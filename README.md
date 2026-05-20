@@ -92,10 +92,15 @@ Step 9  释放锁 UPDATE lock SET state='idle'
 记录    持久记忆保存决策 + ccrecall 审计
 ```
 
-## 模块边界
+## 模块边界（用户配置）
 
-| Agent | 可修改 | 禁止 |
-|-------|--------|------|
-| `engine-agent` | `拆分-打包/`, engine `*.py` | `app/`, `service/` |
-| `service-agent` | `service/` | `app/`, engine `*.py` |
-| `ui-agent` | `app/` | `service/`, engine `*.py` |
+首次启动时 Worker 会要求用户设定各 agent 的模块边界，存储在 `context.boundaries_json`。所有角色从数据库读取，不硬编码。
+
+配置格式：
+```json
+{
+  "engine-agent": { "can_touch": ["拆分-打包/"], "forbidden": ["app/", "service/"] },
+  "service-agent": { "can_touch": ["service/"], "forbidden": ["app/", "*.py"] },
+  "ui-agent": { "can_touch": ["app/"], "forbidden": ["service/", "*.py"] }
+}
+```

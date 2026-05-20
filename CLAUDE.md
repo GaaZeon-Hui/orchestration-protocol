@@ -42,7 +42,7 @@ cur.executescript("""
     CREATE TABLE IF NOT EXISTS context (
         id INTEGER PRIMARY KEY CHECK(id=1), last_commit TEXT,
         agent_history_json TEXT DEFAULT '[]', warnings_json TEXT DEFAULT '[]',
-        pipeline TEXT, api_contract TEXT, meta_fields TEXT,
+        boundaries_json TEXT, pipeline TEXT, api_contract TEXT, meta_fields TEXT,
         updated_at TEXT DEFAULT (datetime('now','localtime'))
     );
     INSERT OR IGNORE INTO context (id) VALUES (1);

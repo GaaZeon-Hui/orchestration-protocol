@@ -14,12 +14,13 @@ description: Orchestrator role. Handles sentinel checks, three-pronged analysis,
 **加载后立即执行：**
 
 1. 确保数据库已初始化
-2. 哨兵检查：`git log --oneline -5; git diff --stat`
-3. 查待处理项：
+2. 读取模块边界：`SELECT boundaries_json FROM context WHERE id=1`
+3. 哨兵检查：`git log --oneline -5; git diff --stat`
+4. 查待处理项：
    - `SELECT id FROM requests WHERE status='pending' AND id NOT IN (SELECT id FROM processed WHERE type='request')`
    - `SELECT request_id FROM completions WHERE request_id NOT IN (SELECT id FROM processed WHERE type='completion')`
-4. 如有待处理 → 立即审查
-5. 启动后台 Monitor（含心跳维护）
+5. 如有待处理 → 立即审查
+6. 启动后台 Monitor（含心跳维护）
 
 ### Monitor + 心跳维护
 
@@ -93,9 +94,12 @@ git log --oneline -5; git diff --stat
 - vs 已提交 commit、vs 脏文件、vs agent_history 上轮
 - 依赖链追踪：链上任一环节断开即失效
 
-### 2. 越界（判断方向，不只贴标签）
-- engine-agent 改 `service/` → 形式越界。若让 service 调引擎统一入口（收敛），方向正确
-- 非 engine-agent 改引擎文件 → 真正越界
+### 2. 越界
+
+从 `context.boundaries_json` 读取当前项目边界，对照 worker 的 agent 类型和声明的 scope 判断：
+- 形式上越过边界但方向收敛（让下层调统一入口）→ 可放行
+- 实质性越界（非本模块 agent 改核心文件）→ 阻塞
+- 边界未配置 → 阻塞并要求先由 Worker 配置
 
 ### 3. 逻辑变更
 - 新增函数/参数？签名变更向后兼容？API 字段退化？

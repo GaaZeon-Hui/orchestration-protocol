@@ -135,6 +135,7 @@ CREATE TABLE IF NOT EXISTS context (
     last_commit TEXT,
     agent_history_json TEXT DEFAULT '[]',
     warnings_json TEXT DEFAULT '[]',
+    boundaries_json TEXT,                           -- 模块边界（用户配置）
     pipeline TEXT,
     api_contract TEXT,
     meta_fields TEXT,
@@ -155,8 +156,6 @@ CREATE INDEX IF NOT EXISTS idx_processed_type ON processed(type);
 
 ## 模块边界
 
-| Agent | Can touch | Forbidden |
-|-------|-----------|-----------|
-| `engine-agent` | `拆分-打包/`, `*.py` root engine | `app/`, `service/` |
-| `service-agent` | `service/` | `app/`, engine `*.py` |
-| `ui-agent` | `app/` | `service/`, engine `*.py` |
+模块边界由用户在首次启动时配置，存储在 `context.boundaries_json`。Worker 和 Orchestrator 均从数据库读取，不硬编码。
+
+配置格式见 `worker-role.md` Step 0。

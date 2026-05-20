@@ -11,18 +11,67 @@ description: Worker Agent role. Handles submitting requests, monitoring approval
 
 | Step | What |
 |------|------|
-| 0. Restore | `mem_search` 查未完成任务 |
-| 1. Pull + Read | git pull, CLAUDE.md, lock state |
-| 2. Check lock | `SELECT state FROM lock WHERE id=1` → 必须 `idle` |
-| 3. Request | `INSERT INTO requests` + `mem_save` |
-| 4. Monitor | SQL 增量轮询 → 检测 status 变更 |
-| 5. Read approval | 查 `approvals` 表 |
-| 6. Modify | 仅修改授权文件 |
-| 7. Self-review | 自审越界和逻辑变更 |
-| 8. Completion | `INSERT INTO completions` + `mem_update` |
-| 9. Release | `UPDATE lock SET state='idle'` |
+| 0. Configure | 检查模块边界，未配置则要求用户设定（见下方） |
+| 1. Restore | `mem_search` 查未完成任务 |
+| 2. Pull + Read | git pull, lock state, boundaries from context |
+| 3. Check lock | `SELECT state FROM lock WHERE id=1` → 必须 `idle` |
+| 4. Request | `INSERT INTO requests` + `mem_save` |
+| 5. Monitor | SQL 增量轮询 → 检测 status 变更 |
+| 6. Read approval | 查 `approvals` 表 |
+| 7. Modify | 仅修改授权文件，对照模块边界 |
+| 8. Self-review | 自审越界和逻辑变更 |
+| 9. Completion | `INSERT INTO completions` + `mem_update` |
+| 10. Release | `UPDATE lock SET state='idle'` |
 
-## Step 2: 检查锁
+## Step 0: 配置模块边界
+
+**首次启动时必须执行，后续每次启动检查确认。**
+
+```python
+import json
+conn = sqlite3.connect('.claude/orchestrator/orchestrator.db')
+cur = conn.cursor()
+cur.execute("SELECT boundaries_json FROM context WHERE id=1")
+row = cur.fetchone()
+boundaries = json.loads(row[0]) if row and row[0] else None
+
+if boundaries is None:
+    print("未配置模块边界，需要用户设定。")
+    print("请为以下 agent 指定可修改和禁止的目录：")
+    print("  engine-agent service-agent ui-agent")
+    print("格式示例：{agent}: {can_touch} | {forbidden}")
+    # 等待用户输入后保存
+    # user_input → 解析为 boundaries dict →
+    # cur.execute("UPDATE context SET boundaries_json=? WHERE id=1",
+    #             (json.dumps(boundaries, ensure_ascii=False),))
+    # conn.commit()
+else:
+    print(f"当前边界: {json.dumps(boundaries, ensure_ascii=False, indent=2)}")
+    # 询问用户是否需要修改
+```
+
+**配置格式（写入 `context.boundaries_json`）：**
+
+```json
+{
+  "engine-agent": {
+    "can_touch": ["拆分-打包/", "*.py"],
+    "forbidden": ["app/", "service/"]
+  },
+  "service-agent": {
+    "can_touch": ["service/"],
+    "forbidden": ["app/", "*.py"]
+  },
+  "ui-agent": {
+    "can_touch": ["app/"],
+    "forbidden": ["service/", "*.py"]
+  }
+}
+```
+
+Agent 通过表名（`engine-agent`/`service-agent`/`ui-agent`）查找自己的边界。修改和自审时**必须对照此配置**。
+
+## Step 1: 检查锁
 
 ```python
 import sqlite3
@@ -155,14 +204,6 @@ cur.execute("""UPDATE lock SET state='idle', holder=NULL, request_id=NULL,
                 scope_json=NULL, acquired_at=NULL, expires_at=NULL WHERE id=1""")
 conn.commit()
 ```
-
-## 模块边界
-
-| Agent | Can touch | Forbidden |
-|-------|-----------|-----------|
-| `engine-agent` | `拆分-打包/`, `*.py` root engine | `app/`, `service/` |
-| `service-agent` | `service/` | `app/`, engine `*.py` |
-| `ui-agent` | `app/` | `service/`, engine `*.py` |
 
 ---
 

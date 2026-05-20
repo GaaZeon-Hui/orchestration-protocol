@@ -1,0 +1,48 @@
+# 一键安装
+npx mcp-simple-memory init
+# 重启 Claude Code 即可使用 7 个记忆工具
+Agent 记住自己之前提交过哪些请求
+
+Orchestrator 记住历史审批模式
+
+跨会话追溯决策原因
+
+
+# Worker Agent 记住自己的任务
+
+持久记忆服务器（mcp-simple-memory）
+python文件
+mem_save({ 
+    text: "engine-agent 提交了重构 scoring 模块的请求 #123，等待审批", 
+    type: "task", 
+    tags: ["engine-agent", "pending"],
+    project: "orchestrator-demo"
+})
+mem_search({ query: "engine-agent pending tasks", tag: "pending" })
+# 下次启动时恢复上下文
+
+
+项目文档索引（pinakes）
+// .claude/settings.json
+{
+  "mcpServers": {
+    "project-docs": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@pella-labs/pinakes", "serve", "--project-root", "."]
+    }
+  }
+}
+
+GitHub MCP 服务器
+让 Claude Code 直接操作 PR、Issue、Review
+json
+{
+  "mcpServers": {
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@model-context-protocol/server-github"],
+      "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_xxx" }
+    }
+  }
+}

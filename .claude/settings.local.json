@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(xxd \"D:\\\\新建文件夹 \\(2\\)\\\\持久记忆服务器\")",
+      "Bash(xxd \"D:\\\\新建文件夹 \\(2\\)\\\\会话转录分析\")",
+      "Bash(cp \"D:\\\\新建文件夹 \\(2\\)\\\\orchestration-protocol\" \"D:\\\\新建文件夹 \\(2\\)\\\\.claude\\\\skills\\\\orchestration-protocol\")",
+      "Bash(cp \"D:\\\\新建文件夹 \\(2\\)\\\\orchestrator-role.md\" \"D:\\\\新建文件夹 \\(2\\)\\\\.claude\\\\skills\\\\orchestrator-role.md\")",
+      "Bash(cp \"D:\\\\新建文件夹 \\(2\\)\\\\worker-role.md\" \"D:\\\\新建文件夹 \\(2\\)\\\\.claude\\\\skills\\\\worker-role.md\")",
+      "Bash(cp orchestration-protocol *)",
+      "Bash(cp orchestrator-role.md .claude/skills/orchestrator-role.md)",
+      "Bash(cp worker-role.md .claude/skills/worker-role.md)",
+      "Bash(python3 test-registration.py)",
+      "Bash(mkdir -p __TRACKED_VAR__/.claude/skills)",
+      "Bash(cp 'D:/新建文件夹 \\(2\\)/.claude/skills/orchestration-protocol.md' __TRACKED_VAR__/.claude/skills/orchestration-protocol.md)",
+      "Bash(cp 'D:/新建文件夹 \\(2\\)/.claude/skills/orchestrator-role.md' __TRACKED_VAR__/.claude/skills/orchestrator-role.md)",
+      "Bash(cp 'D:/新建文件夹 \\(2\\)/.claude/skills/worker-role.md' __TRACKED_VAR__/.claude/skills/worker-role.md)",
+      "Bash(git init *)",
+      "Bash(git add *)"
+    ]
+  }
+}

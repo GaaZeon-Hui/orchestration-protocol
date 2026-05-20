@@ -1,0 +1,21 @@
+# Runtime database
+.claude/orchestrator/orchestrator.db
+.claude/orchestrator/orchestrator.db-wal
+.claude/orchestrator/orchestrator.db-shm
+
+# Session data (runtime, not part of the skill)
+.claude/sessions/
+.claude/session-env/
+.claude/backups/
+.claude/cache/
+.claude/history.jsonl
+.claude/.last-cleanup
+.claude/debug/
+.claude/downloads/
+.claude/file-history/
+.claude/plans/
+
+# Python
+__pycache__/
+*.pyc
+test_orchestrator.db

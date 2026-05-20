@@ -3,6 +3,9 @@
 .claude/orchestrator/orchestrator.db-wal
 .claude/orchestrator/orchestrator.db-shm
 
+# Local settings (machine-specific, not part of the skill)
+.claude/settings.local.json
+
 # Session data (runtime, not part of the skill)
 .claude/sessions/
 .claude/session-env/

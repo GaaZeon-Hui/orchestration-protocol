@@ -11,5 +11,5 @@ role = orc.try_register()
 print(f"ROLE: {role}")
 ```
 
-- `ROLE: orchestrator` → 读 `.claude/skills/orchestrator-role.md`
-- `ROLE: worker` → 读 `.claude/skills/worker-role.md`
+- `ROLE: orchestrator` → 读 `.claude/skills/orchestrator-role/SKILL.md`
+- `ROLE: worker` → 读 `.claude/skills/worker-role/SKILL.md`

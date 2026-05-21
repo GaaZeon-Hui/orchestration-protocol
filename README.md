@@ -48,9 +48,12 @@ cd orchestration-protocol
 ├── README.md
 ├── .gitignore
 └── .claude/skills/
-    ├── SKILL.md                   # 角色注册指引 + DB Schema
-    ├── orchestrator-role.md       # 编排者完整指令
-    └── worker-role.md             # 工作者完整指令
+    ├── orchestration-protocol/
+    │   └── SKILL.md               # 角色注册指引 + DB Schema
+    ├── orchestrator-role/
+    │   └── SKILL.md               # 编排者完整指令
+    └── worker-role/
+        └── SKILL.md               # 工作者完整指令
 ```
 
 ## 工作流程

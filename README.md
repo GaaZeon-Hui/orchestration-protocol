@@ -5,16 +5,15 @@
 ## 架构
 
 ```
-┌─────────────────────┐         ┌─────────────────────┐
-│   Orchestrator      │         │   Worker Agent      │
-│                     │  SQLite │                     │
-│ • 哨兵检查          │◄───────►│ • 提交请求 + 自审   │
-│ • 冲突/越界/逻辑    │   WAL   │ • 增量轮询等待审批  │
-│   三项分析          │         │ • 仅改授权文件      │
-│ • 事务签发锁        │         │ • 提交 completion   │
-│ • 逐条验证 completion│        │ • 跨会话任务恢复    │
-│ • 心跳维护          │         │                     │
-└─────────────────────┘         └─────────────────────┘
+┌─────────────────────────┐         ┌─────────────────────────┐
+│     Orchestrator        │         │     Worker Agent        │
+│                         │  SQLite │                         │
+│ • 哨兵检查              │◄───────►│ • 提交请求 + 自审       │
+│ • 冲突/越界/逻辑分析    │   WAL   │ • 增量轮询等待审批      │
+│ • 事务签发锁            │         │ • 仅改授权文件          │
+│ • 逐条验证 completion   │         │ • 提交 completion       │
+│ • 心跳维护              │         │ • 跨会话任务恢复        │
+└─────────────────────────┘         └─────────────────────────┘
 ```
 
 ## 核心设计
@@ -25,7 +24,7 @@
 | WAL 模式 | 读不阻塞写，多个 Worker 可同时读写不同行 |
 | lock 表单行设计 | 任务锁 + 角色注册同一条 UPDATE，抢注失败自动降级 |
 | 心跳自动接任 | 编排者死亡 90s 内自动检测，下个 agent 接替 |
-| 全状态单文件 | 请求、审批、completion、锁、上下文全部在 `orchestrator.db` |
+| 独立 Python 库 | `orchestrator.py` — 所有 DB 操作封装为 `Orchestrator` 类 |
 
 ## 安装
 
@@ -34,73 +33,67 @@ git clone https://github.com/GaaZeon-Hui/orchestration-protocol.git
 cd orchestration-protocol
 ```
 
-仅依赖 Python 3 标准库（`sqlite3`）。可选增强：
-
-```bash
-npx mcp-simple-memory init   # 跨会话持久记忆
-npx ccrecall sync             # 会话转录分析
-```
+仅依赖 Python 3 标准库（`sqlite3`）。可选：`mcp-simple-memory`（跨会话记忆）、`ccrecall`（会话转录分析）。
 
 ## 使用
 
-在此目录下启动 Claude Code 会话。Agent 启动时自动读取 `CLAUDE.md` 并执行角色注册——无需手动输入任何命令。
-
-**角色自动分配：**
-1. 第一个启动的 agent 注册为 **Orchestrator**
-2. 后续启动的 agent 注册为 **Worker**
-3. Orchestrator 退出超过 90 秒后，下一个 Worker 自动接任
+在此目录下启动 Claude Code 会话。Agent 读取 `CLAUDE.md` → 导入 `orchestrator.py` → 自动执行角色注册。
 
 ## 文件结构
 
 ```
-├── CLAUDE.md                      # 启动入口（自动角色检测）
-├── orchestration-protocol.md      # 角色注册 + 完整 DB Schema
-├── orchestrator-role.md           # 编排者完整指令
-├── worker-role.md                 # 工作者完整指令
-├── .claude/skills/                # Claude Code skill 文件
-│   ├── orchestration-protocol.md
-│   ├── orchestrator-role.md
-│   └── worker-role.md
+├── orchestrator.py                # Python 库 — 所有 DB 操作
+├── test_orchestrator.py           # 20 个测试
+├── CLAUDE.md                      # 启动入口
+├── README.md
 ├── .gitignore
-└── README.md
+└── .claude/skills/
+    ├── orchestration-protocol.md  # 角色注册指引 + DB Schema
+    ├── orchestrator-role.md       # 编排者完整指令
+    └── worker-role.md             # 工作者完整指令
 ```
 
 ## 工作流程
 
-### Worker（工作者）
-
+### Worker
 ```
-Step 0  恢复记忆 → 查上次未完成任务
-Step 1  Pull + 读上下文
-Step 2  检查锁（必须 idle）
-Step 3  提交请求 INSERT INTO requests + mem_save
-Step 4  增量轮询 SELECT ... WHERE updated_at > ? → 等审批
-Step 5  读审批结果 → 获取授权 scope
-Step 6  仅修改授权文件
-Step 7  自审越界和逻辑变更
-Step 8  提交 completion + mem_update
-Step 9  释放锁 UPDATE lock SET state='idle'
+Step 0  配置边界 → orc.get_boundaries() / orc.set_boundaries()
+Step 1  恢复记忆 → mem_search
+Step 2  检查锁   → orc.check_lock()
+Step 3  提交请求 → orc.submit_request() + mem_save
+Step 4  等待审批 → orc.wait_for_approval(req_id)
+Step 5  读审批   → orc.get_approval(req_id)
+Step 6  执行修改
+Step 7  自审
+Step 8  提交完成 → orc.submit_completion() + mem_update
+Step 9  释放锁   → orc.release_lock()
 ```
 
-### Orchestrator（编排者）
-
+### Orchestrator
 ```
-启动    初始化 DB + 哨兵检查 git log/diff
-监听    增量查询新请求和 completion + 每 30s 心跳
-审批    三项分析（冲突/越界/逻辑变更）→ 事务签发锁
-验证    逐条对照 git diff 验证 completion → 释锁
-记录    持久记忆保存决策 + ccrecall 审计
+1. orc.init_db() + orc.migrate()
+2. orc.get_boundaries()
+3. 哨兵检查 git log/diff
+4. 监听 orc.run_monitor(id) — 增量查询 + 心跳
+5. 审批 → orc.issue_approval()
+6. 验证 → orc.verify_completion()
+7. 释锁 → orc.release_lock() + orc.update_context()
 ```
 
 ## 模块边界（用户配置）
 
-首次启动时 Worker 会要求用户设定各 agent 的模块边界，存储在 `context.boundaries_json`。所有角色从数据库读取，不硬编码。
+首次启动时 Worker 提示用户设定各 agent 边界，存储在 `context.boundaries_json`。
 
-配置格式：
 ```json
 {
-  "engine-agent": { "can_touch": ["拆分-打包/"], "forbidden": ["app/", "service/"] },
+  "engine-agent": { "can_touch": ["core/"], "forbidden": ["app/", "service/"] },
   "service-agent": { "can_touch": ["service/"], "forbidden": ["app/", "*.py"] },
   "ui-agent": { "can_touch": ["app/"], "forbidden": ["service/", "*.py"] }
 }
+```
+
+## 测试
+
+```bash
+python3 -m pytest test_orchestrator.py -v   # 20 tests, ~1s
 ```

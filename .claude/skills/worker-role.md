@@ -5,7 +5,7 @@ description: Worker Agent role. Uses orchestrator.py for all DB operations. Hand
 
 # Worker Agent Role
 
-> 此后每次启动直接加载本文件，不再读 `orchestration-protocol` 入口。
+> 此后每次启动直接加载本文件，不再读 `SKILL.md` 入口。
 
 **所有数据库操作通过 `orchestrator.py` 中的 `Orchestrator` 类完成。** 导入：`from orchestrator import Orchestrator; orc = Orchestrator()`
 

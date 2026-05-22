@@ -1,6 +1,6 @@
 # Orchestration Protocol — Claude Code 多 Agent 编排系统
 
-基于 SQLite 的分布式编排协议。**Orchestrator**（编排者）和 **Worker**（工作者）通过单个数据库文件 `orchestrator.db` 完成请求审批、锁管理、任务追踪的完整闭环。
+基于 SQLite 的 pipeline 状态机编排协议。**Orchestrator**（编排者）和 **Worker**（工作者）通过 `pipeline_state` 单表 + `transition_stage()` CAS 推进完成请求审批、修改、验证的完整闭环。
 
 ## 架构
 
@@ -8,23 +8,36 @@
 ┌─────────────────────────┐         ┌─────────────────────────┐
 │     Orchestrator        │         │     Worker Agent        │
 │                         │  SQLite │                         │
-│ • 哨兵检查              │◄───────►│ • 提交请求 + 自审       │
-│ • 冲突/越界/逻辑分析    │   WAL   │ • 增量轮询等待审批      │
-│ • 事务签发锁            │         │ • 仅改授权文件          │
-│ • 逐条验证 completion   │         │ • 提交 completion       │
-│ • 心跳维护              │         │ • 跨会话任务恢复        │
-└─────────────────────────┘         └─────────────────────────┘
+│ • 哨兵检查              │◄───────►│ • init_pipeline         │
+│ • 冲突/越界/逻辑分析    │   WAL   │ • 轮询等待审批          │
+│ • transition_stage()    │         │ • transition_stage()    │
+│   审批/reject           │         │   推进 modifying → done │
+│ • 验证 completion       │         │ • 自审 + completion    │
+│ • 心跳维护              │         │ • 跨会话崩溃恢复       │
+└──────────┬──────────────┘         └───────────┬─────────────┘
+           │                                    │
+           │        pipeline.py                 │
+           │   ┌──────────────────┐             │
+           └──►│ transition_stage │◄────────────┘
+               │ VALID_TRANSITIONS│
+               │ ROLE_PERMISSIONS │
+               │ + audit_log      │
+               └──────────────────┘
 ```
 
 ## 核心设计
 
 | 决策 | 理由 |
 |------|------|
-| SQLite 替代 JSON 文件 | ACID 事务、行级锁自动序列化、`WHERE updated_at > ?` 增量查询 |
+| `pipeline_state` 单表替代 5 表 | 一表承载完整生命周期，无需 JOIN |
+| `pipeline.py` 独立模块 | `transition_stage()` 脱离 Orchestrator 类，Worker 也可调用 |
+| `transition_stage()` CAS | `WHERE stage=? AND revision=?` 保证并发安全 |
+| `ROLE_PERMISSIONS` 权限矩阵 | Python 层拦截越权推进，role 只能从授权 stage 发起转移 |
+| `audit_log` 自动审计 | 每次 stage 转移追加一行，payload_json 仅存变更列，不可跳过 |
+| SQL trigger `tr_stage_transition` | DB 层兜底校验转移合法性+CAS |
 | WAL 模式 | 读不阻塞写，多个 Worker 可同时读写不同行 |
-| lock 表单行设计 | 任务锁 + 角色注册同一条 UPDATE，抢注失败自动降级 |
 | 心跳自动接任 | 编排者死亡 90s 内自动检测，下个 agent 接替 |
-| 独立 Python 库 | `orchestrator.py` — 所有 DB 操作封装为 `Orchestrator` 类 |
+| `recover_pipeline()` | 崩溃后按断点 stage 续跑，无需 MCP 外部记忆 |
 
 ## 安装
 
@@ -33,7 +46,7 @@ git clone https://github.com/GaaZeon-Hui/orchestration-protocol.git
 cd orchestration-protocol
 ```
 
-仅依赖 Python 3 标准库（`sqlite3`）。可选：`mcp-simple-memory`（跨会话记忆）、`ccrecall`（会话转录分析）。
+仅依赖 Python 3 标准库（`sqlite3`）。
 
 ## 使用
 
@@ -42,46 +55,61 @@ cd orchestration-protocol
 ## 文件结构
 
 ```
-├── orchestrator.py                # Python 库 — 所有 DB 操作
-├── test_orchestrator.py           # 20 个测试
-├── CLAUDE.md                      # 启动入口
+├── pipeline.py                     # 独立协议模块 — transition_stage() + 常量
+├── orchestrator.py                 # Python 库 — 查询 + 角色注册 + monitor
+├── test_pipeline.py                # pipeline.py 单元测试
+├── test_orchestrator.py            # orchestrator.py 集成测试
+├── CLAUDE.md                       # 启动入口
 ├── README.md
 ├── .gitignore
 └── .claude/skills/
     ├── orchestration-protocol/
-    │   └── SKILL.md               # 角色注册指引 + DB Schema
+    │   └── SKILL.md                # 角色注册 + Schema + 权限矩阵
     ├── orchestrator-role/
-    │   └── SKILL.md               # 编排者完整指令
+    │   └── SKILL.md                # 编排者完整指令
     └── worker-role/
-        └── SKILL.md               # 工作者完整指令
+        └── SKILL.md                # 工作者完整指令
 ```
 
 ## 工作流程
 
-### Worker
+### Worker（pipeline stage 驱动）
+
 ```
-Step 0  配置边界 → orc.get_boundaries() / orc.set_boundaries()
-Step 1  恢复记忆 → mem_search
-Step 2  检查锁   → orc.check_lock()
-Step 3  提交请求 → orc.submit_request() + mem_save
-Step 4  等待审批 → orc.wait_for_approval(req_id)
-Step 5  读审批   → orc.get_approval(req_id)
-Step 6  执行修改
-Step 7  自审
-Step 8  提交完成 → orc.submit_completion() + mem_update
-Step 9  释放锁   → orc.release_lock()
+Step 0  配置边界     → orc.get_boundaries() / orc.set_boundaries()
+Step 1  恢复上下文   → orc.get_pending_requests() / orc.recover_pipeline()
+Step 2  Pull + 读   → git pull, get_pipeline(), get_boundaries()
+Step 3  冲突检查     → 确认同 agent 无 modifying
+Step 4  创建 pipeline → orc.init_pipeline()
+Step 5  等待审批     → poll get_pipeline() 直至 approved/rejected
+Step 6  读审批       → get_pipeline() → granted_scope_json
+Step 7  修改         → transition_stage(approved→modifying, role='worker')
+                    → 仅改授权文件
+                    → transition_stage(modifying→self_review_done, role='worker')
+Step 8  自审         → 对照 boundaries
+Step 9  Completion   → transition_stage(self_review_done→completion_submitted, ...)
+        + 释锁       → 等 completed → transition_stage(completed→lock_released)
 ```
 
 ### Orchestrator
+
 ```
 1. orc.init_db() + orc.migrate()
 2. orc.get_boundaries()
 3. 哨兵检查 git log/diff
-4. 监听 orc.run_monitor(id) — 增量查询 + 心跳
-5. 审批 → orc.issue_approval()
-6. 验证 → orc.verify_completion()
-7. 释锁 → orc.release_lock() + orc.update_context()
+4. 监听 orc.run_monitor(id) — 按 pipeline stage 过滤
+5. 三项分析 → transition_stage(role='orchestrator') 逐级推进
+6. 审批 → transition_stage(logic_analysis_done → approved/rejected)
+7. 验证 → 对照 git diff
+8. 完成 → transition_stage(completion_submitted → completed)
 ```
+
+## 权限矩阵（`pipeline.ROLE_PERMISSIONS`）
+
+| Role | 可发起 stage |
+|------|-------------|
+| **orchestrator** | `request_submitted`, `conflict_analysis_done`, `boundary_analysis_done`, `logic_analysis_done`, `completion_submitted` |
+| **worker** | `approved`, `modifying`, `self_review_done`, `completed` |
 
 ## 模块边界（用户配置）
 
@@ -89,14 +117,16 @@ Step 9  释放锁   → orc.release_lock()
 
 ```json
 {
-  "engine-agent": { "can_touch": ["core/"], "forbidden": ["app/", "service/"] },
-  "service-agent": { "can_touch": ["service/"], "forbidden": ["app/", "*.py"] },
-  "ui-agent": { "can_touch": ["app/"], "forbidden": ["service/", "*.py"] }
+  "py-agent": { "can_touch": ["*.py"], "forbidden": ["*.md", "app/", "service/"] },
+  "service-agent": { "can_touch": ["service/"], "forbidden": ["app/", "*.py", "*.md"] },
+  "ui-agent": { "can_touch": ["app/"], "forbidden": ["service/", "*.py", "*.md"] },
+  "md-agent": { "can_touch": ["*.md"], "forbidden": ["*.py", "app/", "service/"] }
 }
 ```
 
 ## 测试
 
 ```bash
-python3 -m pytest test_orchestrator.py -v   # 20 tests, ~1s
+python3 -m pytest test_pipeline.py -v       # transition_stage + 权限 + CAS
+python3 -m pytest test_orchestrator.py -v   # 集成测试
 ```

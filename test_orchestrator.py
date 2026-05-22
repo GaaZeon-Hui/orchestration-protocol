@@ -1,4 +1,5 @@
-"""Tests for orchestrator.py — 14 scenarios."""
+"""Tests for orchestrator.py — pipeline state machine edition."""
+import json
 import os
 import sys
 import threading
@@ -7,46 +8,60 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from orchestrator import Orchestrator, _tz_plus8
-
+from pipeline import (
+    transition_stage,
+    VALID_TRANSITIONS,
+    TERMINAL_STAGES,
+)
 
 TEST_DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_test_orchestrator.db")
 
 
-class TestOrchestrator(unittest.TestCase):
+class TestPipelineOrchestrator(unittest.TestCase):
 
     def setUp(self):
-        if os.path.exists(TEST_DB):
-            os.remove(TEST_DB)
-        for ext in ("-wal", "-shm"):
-            if os.path.exists(TEST_DB + ext):
-                os.remove(TEST_DB + ext)
+        for path in [TEST_DB, TEST_DB + "-wal", TEST_DB + "-shm"]:
+            for _ in range(5):
+                try:
+                    if os.path.exists(path):
+                        os.remove(path)
+                    break
+                except PermissionError:
+                    time.sleep(0.05)
         self.orc = Orchestrator(TEST_DB)
         self.orc.init_db()
         self.orc.migrate()
         self.tz = _tz_plus8()
 
     def tearDown(self):
-        if os.path.exists(TEST_DB):
-            os.remove(TEST_DB)
-        for ext in ("-wal", "-shm"):
-            if os.path.exists(TEST_DB + ext):
-                os.remove(TEST_DB + ext)
+        self.orc = None
+        for path in [TEST_DB, TEST_DB + "-wal", TEST_DB + "-shm"]:
+            for _ in range(5):
+                try:
+                    if os.path.exists(path):
+                        os.remove(path)
+                    break
+                except PermissionError:
+                    time.sleep(0.05)
 
     # ── 1. init_db ──────────────────────────────────────────
 
     def test_init_db_idempotent(self):
-        """init_db is safe to call multiple times."""
         self.orc.init_db()
-        self.orc.init_db()  # no error
+        self.orc.init_db()
 
-    def test_all_tables_exist(self):
+    def test_tables_and_trigger_exist(self):
         conn = self.orc._connect()
-        tables = ["lock", "requests", "approvals", "completions", "context", "processed"]
+        tables = ["pipeline_state", "context", "audit_log"]
         for t in tables:
             row = conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (t,)
             ).fetchone()
-            self.assertIsNotNone(row, f"Table {t} missing")
+            self.assertIsNotNone(row, "Table {} missing".format(t))
+        trigger = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='trigger' AND name='tr_stage_transition'"
+        ).fetchone()
+        self.assertIsNotNone(trigger, "Trigger missing")
         conn.close()
 
     # ── 2. Registration ─────────────────────────────────────
@@ -58,6 +73,7 @@ class TestOrchestrator(unittest.TestCase):
         self.assertEqual(role, "orchestrator")
         alive, oid = self.orc.check_orchestrator_alive()
         self.assertTrue(alive)
+        self.assertEqual(oid, "agent-A-0001")
 
     def test_registration_second_agent(self):
         self.orc.try_register("agent-A-0001")
@@ -67,12 +83,11 @@ class TestOrchestrator(unittest.TestCase):
         self.assertEqual(role, "worker")
 
     def test_registration_race(self):
-        """Two concurrent registrations: exactly one orchestrator."""
         results = []
 
         def register(name):
             o = Orchestrator(TEST_DB)
-            results.append(o.try_register(f"{name}-sid"))
+            results.append(o.try_register("{}-sid".format(name)))
 
         t1 = threading.Thread(target=register, args=("agent-X",))
         t2 = threading.Thread(target=register, args=("agent-Y",))
@@ -86,10 +101,9 @@ class TestOrchestrator(unittest.TestCase):
 
     def test_heartbeat_timeout_takeover(self):
         self.orc.try_register("agent-A-0001")
-        # Artificially age heartbeat
         conn = self.orc._connect()
         conn.execute(
-            "UPDATE lock SET orchestrator_heartbeat=datetime('now','localtime','-120 seconds')"
+            "UPDATE context SET orchestrator_heartbeat=datetime('now','localtime','-120 seconds')"
         )
         conn.commit()
         conn.close()
@@ -104,122 +118,254 @@ class TestOrchestrator(unittest.TestCase):
         self.assertTrue(self.orc.send_heartbeat("agent-A-0001"))
         self.assertFalse(self.orc.send_heartbeat("wrong-id"))
 
-    # ── 3. Lock ─────────────────────────────────────────────
+    # ── 3. Pipeline init + get ──────────────────────────────
 
-    def test_lock_acquire_release(self):
-        self.assertIsNone(self.orc.check_lock())
-        self.orc.acquire_lock("engine-agent", "req-001", {"files": ["a.py"]})
-        lock = self.orc.check_lock()
-        self.assertIsNotNone(lock)
-        self.assertEqual(lock["holder"], "engine-agent")
-        self.orc.release_lock()
-        self.assertIsNone(self.orc.check_lock())
-
-    def test_lock_busy(self):
-        self.orc.acquire_lock("engine-agent", "req-001", {"files": ["a.py"]})
-        with self.assertRaises(RuntimeError):
-            self.orc.acquire_lock("service-agent", "req-002", {"files": ["b.py"]})
-
-    # ── 4. Request flow ─────────────────────────────────────
-
-    def test_submit_and_get_status(self):
-        req_id = self.orc.submit_request(
-            "engine-agent", "test reason",
-            {"modules": ["core/"], "files": ["core/a.py"], "excluded": []},
+    def test_init_pipeline(self):
+        req_id = self.orc.init_pipeline(
+            "py-agent", "test reason",
+            {"modules": ["core/"], "files": ["a.py"], "excluded": []},
             {"summary": "refactor", "steps": ["step1"], "breaking_changes": False},
-            {"potential_issues": ["预判 — 安全"]},
-            ["不新建函数"],
+            {"potential_issues": ["safe"]},
+            ["c1"],
             self.tz,
         )
-        self.assertIn("engine-agent-", req_id)
-        self.assertEqual(self.orc.get_request_status(req_id), "pending")
+        self.assertIn("py-agent-", req_id)
+        p = self.orc.get_pipeline(req_id)
+        self.assertEqual(p["stage"], "request_submitted")
+        self.assertEqual(p["revision"], 0)
+        self.assertEqual(p["reason"], "test reason")
+        self.assertEqual(p["scope_json"]["modules"], ["core/"])
+        self.assertEqual(p["constraints_json"], ["c1"])
 
-    def test_wait_for_approval(self):
-        req_id = self.orc.submit_request(
-            "engine-agent", "test",
-            {"modules": [], "files": ["x.py"], "excluded": []},
-            {"summary": "fix", "steps": [], "breaking_changes": False},
-            {"potential_issues": []}, [], self.tz,
-        )
-        # Approve via separate connection (simulates orchestrator in another process)
-        o2 = Orchestrator(TEST_DB)
-        o2.issue_approval("engine-agent", req_id,
-                          {"files": ["x.py"], "forbidden": []},
-                          "approved", tz=self.tz)
-        # wait_for_approval should return immediately since already approved
-        status = self.orc.wait_for_approval(req_id, poll_interval=0.1)
-        self.assertEqual(status, "approved")
+    def test_get_pipeline_none(self):
+        self.assertIsNone(self.orc.get_pipeline("nonexistent"))
 
-    # ── 5. Approval flow ────────────────────────────────────
+    # ── 4. Stage transitions (via pipeline.transition_stage) ─
 
-    def test_approve_flow(self):
-        req_id = self.orc.submit_request(
-            "engine-agent", "reason",
-            {"modules": [], "files": ["a.py"], "excluded": []},
+    def test_full_pipeline_flow(self):
+        req_id = self.orc.init_pipeline(
+            "py-agent", "reason",
+            {"files": ["a.py"], "modules": [], "excluded": []},
             {"summary": "x", "steps": [], "breaking_changes": False},
             {"potential_issues": []}, [], self.tz,
         )
-        self.orc.issue_approval(
-            "engine-agent", req_id,
-            {"files": ["a.py"], "forbidden": []}, "approved", tz=self.tz,
+
+        p = self.orc.get_pipeline(req_id)
+        rev = p["revision"]
+
+        # Orchestrator: analysis chain
+        rev, _ = transition_stage(req_id, "conflict_analysis_done", "orchestrator", rev, self.orc.db_path)
+        rev, _ = transition_stage(req_id, "boundary_analysis_done", "orchestrator", rev, self.orc.db_path)
+        rev, _ = transition_stage(req_id, "logic_analysis_done", "orchestrator", rev, self.orc.db_path)
+        rev, _ = transition_stage(
+            req_id, "approved", "orchestrator", rev, self.orc.db_path,
+            approval_status="approved",
+            granted_scope_json=json.dumps({"files": ["a.py"]}),
+            reviewed_by="orchestrator",
         )
-        self.assertEqual(self.orc.get_request_status(req_id), "approved")
-        self.assertTrue(self.orc.is_processed(req_id, "request"))
+        # Worker: modify chain
+        rev, _ = transition_stage(req_id, "modifying", "worker", rev, self.orc.db_path)
+        rev, _ = transition_stage(req_id, "self_review_done", "worker", rev, self.orc.db_path)
+        rev, _ = transition_stage(
+            req_id, "completion_submitted", "worker", rev, self.orc.db_path,
+            self_review_json=json.dumps({"all_steps_completed": True}),
+            commits_json=json.dumps(["abc123"]),
+        )
+        # Orchestrator: verify
+        rev, _ = transition_stage(req_id, "completed", "orchestrator", rev, self.orc.db_path)
+        # Worker: release
+        rev, _ = transition_stage(req_id, "lock_released", "worker", rev, self.orc.db_path)
+
+        p = self.orc.get_pipeline(req_id)
+        self.assertEqual(p["stage"], "lock_released")
+        self.assertEqual(p["revision"], 9)
+        self.assertIsNotNone(p["granted_scope_json"])
+
+    def test_valid_transitions_map_consistent(self):
+        all_stages = set(VALID_TRANSITIONS.keys()) | {
+            t for targets in VALID_TRANSITIONS.values() for t in targets
+        }
+        self.assertIn("request_submitted", all_stages)
+        self.assertIn("lock_released", all_stages)
+        for ts in TERMINAL_STAGES:
+            self.assertNotIn(ts, VALID_TRANSITIONS)
+
+    def test_revision_mismatch_raises_runtime_error(self):
+        req_id = self.orc.init_pipeline(
+            "py-agent", "r",
+            {"files": ["x.py"], "modules": [], "excluded": []},
+            {"summary": "x", "steps": [], "breaking_changes": False},
+            {"potential_issues": []}, [], self.tz,
+        )
+        with self.assertRaises(RuntimeError):
+            transition_stage(req_id, "conflict_analysis_done", "orchestrator",
+                           99, self.orc.db_path)
 
     def test_reject_flow(self):
-        req_id = self.orc.submit_request(
-            "service-agent", "bad idea",
-            {"modules": [], "files": ["engine.py"], "excluded": []},
+        req_id = self.orc.init_pipeline(
+            "py-agent", "bad",
+            {"files": ["engine.py"], "modules": [], "excluded": []},
             {"summary": "x", "steps": [], "breaking_changes": False},
             {"potential_issues": []}, [], self.tz,
         )
-        self.orc.issue_approval(
-            "service-agent", req_id,
-            {}, "rejected", rejection_reason="越界", tz=self.tz,
+        p = self.orc.get_pipeline(req_id)
+        rev = p["revision"]
+        rev, _ = transition_stage(req_id, "conflict_analysis_done", "orchestrator", rev, self.orc.db_path)
+        rev, _ = transition_stage(req_id, "boundary_analysis_done", "orchestrator", rev, self.orc.db_path)
+        rev, _ = transition_stage(req_id, "logic_analysis_done", "orchestrator", rev, self.orc.db_path)
+        rev, _ = transition_stage(
+            req_id, "rejected", "orchestrator", rev, self.orc.db_path,
+            approval_status="rejected",
+            rejection_reason="out of bounds",
         )
-        self.assertEqual(self.orc.get_request_status(req_id), "rejected")
-        approval = self.orc.get_approval(req_id)
-        self.assertIsNotNone(approval)
-        self.assertEqual(approval["rejection_reason"], "越界")
+        p = self.orc.get_pipeline(req_id)
+        self.assertEqual(p["stage"], "rejected")
+        self.assertEqual(p["rejection_reason"], "out of bounds")
 
-    # ── 6. Completion ───────────────────────────────────────
+    # ── 5. Trigger enforcement ──────────────────────────────
 
-    def test_completion_flow(self):
-        req_id = self.orc.submit_request(
-            "engine-agent", "r",
-            {"modules": [], "files": ["a.py"], "excluded": []},
+    def test_trigger_blocks_invalid_transition(self):
+        req_id = self.orc.init_pipeline(
+            "py-agent", "r",
+            {"files": ["x.py"], "modules": [], "excluded": []},
             {"summary": "x", "steps": [], "breaking_changes": False},
             {"potential_issues": []}, [], self.tz,
         )
-        self.orc.submit_completion(
-            req_id, "engine-agent", "2026-05-21T10:00:00+08:00",
-            {"all_steps_completed": True, "files_modified": ["a.py"],
-             "files_not_in_scope": [], "new_functions_created": [],
-             "breaking_changes": [], "constraints_violated": []},
-            ["abc123"], "no sync notes", {"pipeline": ""},
+        conn = self.orc._connect()
+        with self.assertRaises(Exception):
+            conn.execute(
+                "UPDATE pipeline_state SET stage='approved', revision=revision+1 "
+                "WHERE request_id=?",
+                (req_id,),
+            )
+            conn.commit()
+        conn.rollback()
+        conn.close()
+
+    def test_trigger_blocks_revision_jump(self):
+        req_id = self.orc.init_pipeline(
+            "py-agent", "r",
+            {"files": ["x.py"], "modules": [], "excluded": []},
+            {"summary": "x", "steps": [], "breaking_changes": False},
+            {"potential_issues": []}, [], self.tz,
         )
-        self.orc.verify_completion(req_id)
-        self.assertTrue(self.orc.is_processed(req_id, "completion"))
+        conn = self.orc._connect()
+        with self.assertRaises(Exception):
+            conn.execute(
+                "UPDATE pipeline_state SET stage='conflict_analysis_done', revision=5 "
+                "WHERE request_id=?",
+                (req_id,),
+            )
+            conn.commit()
+        conn.rollback()
+        conn.close()
 
-    # ── 7. Dedup ────────────────────────────────────────────
+    # ── 6. Recovery ─────────────────────────────────────────
 
-    def test_dedup(self):
-        self.assertFalse(self.orc.is_processed("req-X", "request"))
-        self.orc.mark_processed("req-X", "request", "approved")
-        self.assertTrue(self.orc.is_processed("req-X", "request"))
-        self.assertFalse(self.orc.is_processed("req-X", "completion"))
+    def test_recover_pipeline_returns_latest(self):
+        r1 = self.orc.init_pipeline(
+            "py-agent", "first",
+            {"files": ["a.py"], "modules": [], "excluded": []},
+            {"summary": "x", "steps": [], "breaking_changes": False},
+            {"potential_issues": []}, [], self.tz,
+        )
+        r2 = self.orc.init_pipeline(
+            "py-agent", "second",
+            {"files": ["b.py"], "modules": [], "excluded": []},
+            {"summary": "x", "steps": [], "breaking_changes": False},
+            {"potential_issues": []}, [], self.tz,
+        )
+        rid, stage = self.orc.recover_pipeline("py-agent")
+        self.assertEqual(rid, r2)
+        self.assertEqual(stage, "request_submitted")
+
+    def test_recover_pipeline_ignores_terminal(self):
+        # Create a rejected pipeline
+        r1 = self.orc.init_pipeline(
+            "py-agent", "rejected task",
+            {"files": ["a.py"], "modules": [], "excluded": []},
+            {"summary": "x", "steps": [], "breaking_changes": False},
+            {"potential_issues": []}, [], self.tz,
+        )
+        p = self.orc.get_pipeline(r1)
+        rev = p["revision"]
+        rev, _ = transition_stage(r1, "conflict_analysis_done", "orchestrator", rev, self.orc.db_path)
+        rev, _ = transition_stage(r1, "boundary_analysis_done", "orchestrator", rev, self.orc.db_path)
+        rev, _ = transition_stage(r1, "logic_analysis_done", "orchestrator", rev, self.orc.db_path)
+        rev, _ = transition_stage(
+            r1, "rejected", "orchestrator", rev, self.orc.db_path,
+            approval_status="rejected", rejection_reason="bad",
+        )
+        # Create and complete another pipeline
+        req_id = self.orc.init_pipeline(
+            "py-agent", "will complete",
+            {"files": ["b.py"], "modules": [], "excluded": []},
+            {"summary": "x", "steps": [], "breaking_changes": False},
+            {"potential_issues": []}, [], self.tz,
+        )
+        p = self.orc.get_pipeline(req_id)
+        rev = p["revision"]
+        flow = [
+            ("conflict_analysis_done", "orchestrator"),
+            ("boundary_analysis_done", "orchestrator"),
+            ("logic_analysis_done", "orchestrator"),
+            ("approved", "orchestrator", {"approval_status": "approved"}),
+            ("modifying", "worker"),
+            ("self_review_done", "worker"),
+            ("completion_submitted", "worker"),
+            ("completed", "orchestrator"),
+            ("lock_released", "worker"),
+        ]
+        for item in flow:
+            new_stage = item[0]
+            role = item[1]
+            kwargs = item[2] if len(item) > 2 else {}
+            rev, _ = transition_stage(req_id, new_stage, role, rev, self.orc.db_path, **kwargs)
+
+        rid, stage = self.orc.recover_pipeline("py-agent")
+        self.assertIsNone(rid)
+        self.assertIsNone(stage)
+
+    # ── 7. Queries ──────────────────────────────────────────
+
+    def test_get_pending_requests(self):
+        self.orc.init_pipeline(
+            "py-agent", "a",
+            {"files": ["a.py"], "modules": [], "excluded": []},
+            {"summary": "x", "steps": [], "breaking_changes": False},
+            {"potential_issues": []}, [], self.tz,
+        )
+        self.orc.init_pipeline(
+            "py-agent", "b",
+            {"files": ["b.py"], "modules": [], "excluded": []},
+            {"summary": "x", "steps": [], "breaking_changes": False},
+            {"potential_issues": []}, [], self.tz,
+        )
+        pending = self.orc.get_pending_requests("py-agent")
+        self.assertEqual(len(pending), 2)
+
+    def test_get_requests_by_stage(self):
+        self.orc.init_pipeline(
+            "py-agent", "r",
+            {"files": ["x.py"], "modules": [], "excluded": []},
+            {"summary": "x", "steps": [], "breaking_changes": False},
+            {"potential_issues": []}, [], self.tz,
+        )
+        items = self.orc.get_requests_by_stage("request_submitted")
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["agent"], "py-agent")
 
     # ── 8. Boundaries ───────────────────────────────────────
 
     def test_boundaries_crud(self):
         self.assertIsNone(self.orc.get_boundaries())
         boundaries = {
-            "engine-agent": {"can_touch": ["core/"], "forbidden": ["app/", "service/"]},
-            "service-agent": {"can_touch": ["service/"], "forbidden": ["app/", "*.py"]},
+            "py-agent": {"can_touch": ["*.py"], "forbidden": ["*.md"]},
+            "md-agent": {"can_touch": ["*.md"], "forbidden": ["*.py"]},
         }
         self.orc.set_boundaries(boundaries)
         result = self.orc.get_boundaries()
-        self.assertEqual(result["engine-agent"]["can_touch"], ["core/"])
+        self.assertEqual(result["py-agent"]["can_touch"], ["*.py"])
 
     # ── 9. Context ──────────────────────────────────────────
 
@@ -234,47 +380,86 @@ class TestOrchestrator(unittest.TestCase):
 
     def test_monitor_detects_new_request(self):
         self.orc.try_register("orch-session-1")
-
-        # Submit request first, then verify monitor detects it
-        self.orc.submit_request(
-            "engine-agent", "test",
-            {"modules": [], "files": ["x.py"], "excluded": []},
+        req_id = self.orc.init_pipeline(
+            "py-agent", "test",
+            {"files": ["x.py"], "modules": [], "excluded": []},
             {"summary": "fix", "steps": [], "breaking_changes": False},
             {"potential_issues": []}, [], self.tz,
         )
-
         gen = self.orc.run_monitor("orch-session-1", heartbeat_interval=60, poll_interval=0.2)
-        events = []
-        for _ in range(5):
-            try:
-                event = next(gen)
-                events.append(event)
-                if event[0] == "NEW_REQUEST":
+        try:
+            events = []
+            for _ in range(5):
+                try:
+                    event = next(gen)
+                    events.append(event)
+                    if event[0] == "NEW_REQUEST":
+                        break
+                except StopIteration:
                     break
-            except StopIteration:
-                break
-        self.assertTrue(any(e[0] == "NEW_REQUEST" for e in events))
+            self.assertTrue(any(e[0] == "NEW_REQUEST" for e in events))
+        finally:
+            gen.close()
 
     def test_monitor_heartbeat_fails_when_taken_over(self):
         self.orc.try_register("orch-A")
-        # Another agent takes over
         conn = self.orc._connect()
         conn.execute(
-            "UPDATE lock SET orchestrator_id='usurper', orchestrator_heartbeat=datetime('now','localtime')"
+            "UPDATE context SET orchestrator_id='usurper', "
+            "orchestrator_heartbeat=datetime('now','localtime')"
         )
         conn.commit()
         conn.close()
 
         gen = self.orc.run_monitor("orch-A", heartbeat_interval=0, poll_interval=0.2)
-        event = next(gen)
-        self.assertEqual(event[0], "HEARTBEAT_FAILED")
+        try:
+            event = next(gen)
+            self.assertEqual(event[0], "HEARTBEAT_FAILED")
+        finally:
+            gen.close()
 
-    # ── 11. Utility ─────────────────────────────────────────
+    # ── 11. CAS concurrency ─────────────────────────────────
+
+    def test_cas_concurrent_advance(self):
+        req_id = self.orc.init_pipeline(
+            "py-agent", "r",
+            {"files": ["x.py"], "modules": [], "excluded": []},
+            {"summary": "x", "steps": [], "breaking_changes": False},
+            {"potential_issues": []}, [], self.tz,
+        )
+        p = self.orc.get_pipeline(req_id)
+        results = []
+
+        def advance():
+            try:
+                transition_stage(
+                    req_id, "conflict_analysis_done", "orchestrator",
+                    p["revision"], self.orc.db_path,
+                )
+                results.append("ok")
+            except (RuntimeError, ValueError):
+                results.append("conflict")
+
+        t1 = threading.Thread(target=advance)
+        t2 = threading.Thread(target=advance)
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+
+        self.assertEqual(results.count("ok"), 1)
+        self.assertIn("conflict", results)
+
+        final = self.orc.get_pipeline(req_id)
+        self.assertEqual(final["stage"], "conflict_analysis_done")
+        self.assertEqual(final["revision"], 1)
+
+    # ── 12. Utility ─────────────────────────────────────────
 
     def test_make_request_id(self):
-        rid = Orchestrator.make_request_id("engine-agent", self.tz)
-        self.assertTrue(rid.startswith("engine-agent-"))
-        self.assertEqual(len(rid.split("-")), 4)  # agent-YYYYMMDD-HHMMSS
+        rid = Orchestrator.make_request_id("py-agent", self.tz)
+        self.assertTrue(rid.startswith("py-agent-"))
+        self.assertEqual(len(rid.split("-")), 5)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,50 @@
+## Pipeline State Machine (指令流水线)
+
+### Core Table
+`pipeline_state` tracks each request through 8 stages. Each stage must be completed in order.
+
+### Write Permissions
+- **Worker Agent**: Can write steps 1 and 8
+- **Orchestrator**: Can write steps 2-7
+- **SQL Triggers**: Enforce sequential completion, prevent skipping
+
+### Recovery by Query
+When any agent restarts:
+1. Query `pipeline_state` for its `request_id`
+2. Find the highest completed step (`stepX = 1`)
+3. Resume from `current_step` (the next incomplete step)
+4. Use optimistic locking (`version` column) to avoid conflicts
+
+### Idempotency Requirements
+Each step must be idempotent (can be safely retried):
+- Step 1 (acquire lock): Check if lock already held
+- Step 7 (issue lock): Check lock table before issuing
+- Step 8 (modify code): Git status → rollback → retry
+
+-- 比 version 更强：用状态机字段 + WHERE 子句做 CAS
+  CREATE TABLE pipeline_state (
+      request_id TEXT PRIMARY KEY,
+      stage TEXT NOT NULL CHECK(stage IN (
+          'lock_check', 'context_load', 'request_submitted',
+          'approval_pending', 'approval_done', 'lock_acquired',
+          'modify', 'self_review', 'completion', 'lock_released'
+      )),
+      revision INTEGER NOT NULL DEFAULT 0,  -- CAS version
+      ...
+  );
+
+  -- Trigger 比代码检查更可靠
+  CREATE TRIGGER tr_stage_transition
+  BEFORE UPDATE ON pipeline_state
+  WHEN NEW.revision != OLD.revision + 1
+       OR NOT is_valid_transition(OLD.stage, NEW.stage)
+  BEGIN
+      SELECT RAISE(ABORT, 'Invalid state transition');
+  END;
+
+  revision 严格自增 + trigger 校验转移合法性，两个 Worker 同时提交 completion 只会成功一个——另一个收到 ABORT，知道要重新读状态。
+
+
+把状态机下沉到 DB schema + trigger 层，比 markdown 指令 + agent 自觉 + 外部 MCP
+  的组合在健壮性上好太多。建议直接往这个方向重构 orchestration-protocol.md 里的 schema，把 lock、requests、approvals、completions、processed
+  五张表合并成这一张 pipeline_state，然后删掉外部 MCP 依赖的恢复逻辑。

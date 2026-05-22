@@ -22,3 +22,5 @@
 __pycache__/
 *.pyc
 test_orchestrator.db
+test_pipeline.db
+orchestrator.db

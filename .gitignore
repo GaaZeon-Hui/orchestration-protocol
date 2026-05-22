@@ -24,3 +24,6 @@ __pycache__/
 test_orchestrator.db
 test_pipeline.db
 orchestrator.db
+
+# Design notes (not part of the distributed skill)
+更新/

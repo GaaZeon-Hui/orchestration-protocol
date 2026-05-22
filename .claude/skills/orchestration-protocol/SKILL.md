@@ -131,9 +131,10 @@ INSERT OR IGNORE INTO context (id) VALUES (1);
 | `transition_stage(req_id, new_stage, role, revision, db_path, **kwargs)` | `pipeline.py` | 唯一 stage 推进入口，含权限+审计 |
 | `run_lint(files_changed, boundaries, agent, base_ref)` | `lint.py` | 越界检查+冲突检测+AST hints，过不了直接 reject |
 | `lint_changed_files(boundaries, agent, base_ref)` | `lint.py` | 便捷函数：git diff --name-only → run_lint() |
-| `init_pipeline(agent, reason, scope, plan, self_review, constraints, tz)` | `orchestrator.py` | 创建 pipeline |
-| `get_pipeline(request_id)` | `orchestrator.py` | 查询单条 pipeline |
+| `init_pipeline(agent, reason, scope, plan, self_review, constraints, tz)` | `orchestrator.py` | 创建 pipeline（同 agent 活跃 pipeline 互斥） |
+| `get_pipeline(request_id)` | `orchestrator.py` | 查询单条 pipeline，JSON 列自动反序列化 |
 | `get_pending_requests(agent)` | `orchestrator.py` | 查未完成 pipeline |
 | `get_requests_by_stage(stage)` | `orchestrator.py` | 按 stage 查询 |
 | `recover_pipeline(agent)` | `orchestrator.py` | 崩溃恢复 |
+| `check_and_heartbeat(orchestrator_id)` | `orchestrator.py` | 单次心跳+扫描新事项 |
 | `get_boundaries()` / `set_boundaries(b)` | `orchestrator.py` | 模块边界 |

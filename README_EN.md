@@ -32,6 +32,7 @@ A SQLite-based pipeline state machine for orchestrating multiple Claude Code age
 |----------|-----------|
 | `pipeline_state` replaces 5 tables | Single table carries the full lifecycle, no JOINs needed |
 | `pipeline.py` standalone module | `transition_stage()` decoupled from Orchestrator class, usable by Worker too |
+| `lint.py` mechanical pre-check | Boundary glob match (blocking) + conflict detection + AST hints (informational); reject before LLM |
 | `transition_stage()` CAS | `WHERE stage=? AND revision=?` guarantees concurrent safety |
 | `ROLE_PERMISSIONS` matrix | Python-layer enforcement: a role can only advance from its authorized stages |
 | `audit_log` auto-audit | One row appended per transition; payload_json captures changed columns only |
@@ -39,6 +40,8 @@ A SQLite-based pipeline state machine for orchestrating multiple Claude Code age
 | WAL mode | Reads never block writes; multiple Workers can read/write different rows |
 | Heartbeat auto-takeover | Orchestrator death detected within 90s; next agent assumes the role |
 | `recover_pipeline()` | Crash recovery by stage checkpoint, no external MCP memory needed |
+| Analysis state persistence | `conflict/boundary/logic_analysis_json` columns save review conclusions for crash recovery |
+| `init_pipeline()` same-agent guard | Prevents concurrent conflicting requests from the same agent type |
 
 ## Installation
 
@@ -62,20 +65,25 @@ Start a Claude Code session in this directory. The agent reads `CLAUDE.md` → i
 
 ```
 ├── pipeline.py                     # Standalone protocol — transition_stage() + constants
-├── orchestrator.py                 # Python library — queries + role registration + monitor
+├── orchestrator.py                 # Python library — queries + role registration + heartbeat
+├── lint.py                         # Mechanical pre-check — boundaries + conflicts + AST hints
 ├── test_pipeline.py                # pipeline.py unit tests
 ├── test_orchestrator.py            # orchestrator.py integration tests
+├── test_lint.py                    # lint.py unit tests
 ├── CLAUDE.md                       # Launch entry point
 ├── README.md                       # Chinese documentation
 ├── README_EN.md                    # This file
+├── 审查报告.md                     # Architecture review & issue tracker
 ├── .gitignore
-└── .claude/skills/
-    ├── orchestration-protocol/
-    │   └── SKILL.md                # Role registration + Schema + Permission matrix
-    ├── orchestrator-role/
-    │   └── SKILL.md                # Orchestrator full instructions
-    └── worker-role/
-        └── SKILL.md                # Worker full instructions
+├── .claude/
+│   ├── settings.json               # Plugin config (superpowers)
+│   └── skills/
+│       ├── orchestration-protocol/
+│       │   └── SKILL.md            # Role registration + Schema + Permission matrix
+│       ├── orchestrator-role/
+│       │   └── SKILL.md            # Orchestrator full instructions
+│       └── worker-role/
+│           └── SKILL.md            # Worker full instructions
 ```
 
 ## Workflow
@@ -86,14 +94,14 @@ Start a Claude Code session in this directory. The agent reads `CLAUDE.md` → i
 Step 0  Configure      → orc.get_boundaries() / orc.set_boundaries()
 Step 1  Recover        → orc.get_pending_requests() / orc.recover_pipeline()
 Step 2  Pull + read    → git pull, get_pipeline(), get_boundaries()
-Step 3  Conflict check → ensure no modifying pipeline exists for the same agent
-Step 4  Init pipeline  → orc.init_pipeline()
-Step 5  Wait approval  → poll get_pipeline() until approved / rejected
+Step 3  Conflict check → orc.get_pending_requests(agent) ensures no active pipeline
+Step 4  Init pipeline  → orc.init_pipeline() (raises RuntimeError if same agent busy)
+Step 5  Wait approval  → get_pipeline() one-shot check; suggest /loop if not yet approved
 Step 6  Read approval  → get_pipeline() → granted_scope_json
 Step 7  Modify         → transition_stage(approved → modifying, role='worker')
                        → modify only authorized files
-                       → transition_stage(modifying → self_review_done, role='worker')
-Step 8  Self-review    → check against boundaries
+Step 8  Self-review    → check against boundaries + lint
+                       → transition_stage(modifying → self_review_done, self_review_json=…)
 Step 9  Complete       → transition_stage(self_review_done → completion_submitted, …)
         + Release      → wait for completed → transition_stage(completed → lock_released)
 ```
@@ -104,11 +112,13 @@ Step 9  Complete       → transition_stage(self_review_done → completion_subm
 1. orc.init_db() + orc.migrate()
 2. orc.get_boundaries()
 3. Sentinel check: git log / diff
-4. Monitor: orc.run_monitor(id) — filters by pipeline stage
-5. Three-pronged analysis → transition_stage(role='orchestrator') step by step
-6. Approval → transition_stage(logic_analysis_done → approved / rejected)
-7. Verify → compare against git diff
-8. Complete → transition_stage(completion_submitted → completed)
+4. One-shot check: orc.check_and_heartbeat(id) — heartbeat + scan for new requests/completions
+   → if no items, suggest /loop 60s for continuous monitoring
+5. Lint pre-check (boundary violations → reject immediately; conflicts + AST hints feed LLM)
+6. Three-pronged analysis → transition_stage(role='orchestrator') step by step, saving JSON each stage
+7. Approval → transition_stage(logic_analysis_done → approved / rejected)
+8. Verify → compare against git diff + lint hints
+9. Complete → transition_stage(completion_submitted → completed)
 ```
 
 ## Permission Matrix (`pipeline.ROLE_PERMISSIONS`)
@@ -149,17 +159,22 @@ On first launch, the Worker prompts the user to set per-agent module boundaries,
 
 | Function | Module | Description |
 |----------|--------|-------------|
-| `transition_stage(req_id, new_stage, role, revision, db_path, **kwargs)` | `pipeline.py` | Single stage-progression entry point with permission + audit |
-| `init_pipeline(agent, reason, scope, plan, self_review, constraints, tz)` | `orchestrator.py` | Create a new pipeline |
-| `get_pipeline(request_id)` | `orchestrator.py` | Fetch a single pipeline |
-| `get_pending_requests(agent)` | `orchestrator.py` | List non-terminal pipelines |
+| `transition_stage(req_id, new_stage, role, revision, db_path, **kwargs)` | `pipeline.py` | Single stage-progression entry point with permission + audit + CAS |
+| `run_lint(files_changed, boundaries, agent, base_ref)` | `lint.py` | Boundary check + conflict detection + AST hints |
+| `lint_changed_files(boundaries, agent, base_ref)` | `lint.py` | Convenience: git diff --name-only → run_lint() |
+| `init_pipeline(agent, reason, scope, plan, self_review, constraints, tz)` | `orchestrator.py` | Create a new pipeline (same-agent active pipeline guard) |
+| `get_pipeline(request_id)` | `orchestrator.py` | Fetch a single pipeline with JSON deserialization |
+| `get_pending_requests(agent)` | `orchestrator.py` | List non-terminal pipelines (excl. rejected/lock_released) |
 | `get_requests_by_stage(stage)` | `orchestrator.py` | Query pipelines by stage |
-| `recover_pipeline(agent)` | `orchestrator.py` | Crash recovery |
-| `get_boundaries()` / `set_boundaries(b)` | `orchestrator.py` | Module boundaries |
+| `recover_pipeline(agent)` | `orchestrator.py` | Crash recovery, returns (request_id, stage) |
+| `check_and_heartbeat(orchestrator_id)` | `orchestrator.py` | One-shot heartbeat + scan for new items (replaces blocking run_monitor) |
+| `get_boundaries()` / `set_boundaries(b)` | `orchestrator.py` | Module boundaries CRUD |
 
 ## Tests
 
 ```bash
-pytest test_pipeline.py -v       # transition_stage + permissions + CAS
-pytest test_orchestrator.py -v   # integration tests
+pytest test_pipeline.py -v       # transition_stage + permissions + CAS + analysis persistence
+pytest test_orchestrator.py -v   # registration/heartbeat/full flow/crash recovery/concurrency guard
+pytest test_lint.py -v           # boundary check / conflict detection / AST parsing / integration
+pytest test_pipeline.py test_orchestrator.py test_lint.py -v  # all 74 tests
 ```

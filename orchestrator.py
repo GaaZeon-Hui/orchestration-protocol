@@ -1,15 +1,14 @@
 """
 Orchestration Protocol — Pipeline State Machine edition.
-DB initialisation, registration, queries, and monitor.
+DB initialisation, registration, queries, and heartbeat.
 Stage transitions delegated to pipeline.transition_stage().
 """
 
 import json
 import os
 import sqlite3
-import time
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from pipeline import (
     transition_stage,
@@ -20,17 +19,17 @@ from pipeline import (
 )
 
 
-def _tz_plus8():
-    return timezone(timedelta(hours=8))
+def _tz_utc():
+    return timezone.utc
 
 
 class Orchestrator:
     """Pipeline-based multi-agent coordination library.
 
-    DB initialisation, registration, queries, and monitor.
+    DB initialisation, registration, queries, and heartbeat.
     Stage transitions are handled by pipeline.transition_stage().
     Worker agents: init_pipeline / get_pipeline / recover_pipeline.
-    Orchestrator agents: add get_requests_by_stage and run_monitor.
+    Orchestrator agents: check_and_heartbeat / get_requests_by_stage.
     """
 
     def __init__(self, db_path=".claude/orchestrator/orchestrator.db"):
@@ -84,6 +83,9 @@ class Orchestrator:
                 commits_json TEXT,
                 sync_notes TEXT,
                 context_updates_json TEXT,
+                conflict_analysis_json TEXT,
+                boundary_analysis_json TEXT,
+                logic_analysis_json TEXT,
                 created_at TEXT DEFAULT (datetime('now','localtime')),
                 updated_at TEXT DEFAULT (datetime('now','localtime'))
             );
@@ -154,8 +156,16 @@ class Orchestrator:
                      "orchestrator_started_at", "boundaries_json"]:
             try:
                 conn.execute("ALTER TABLE context ADD COLUMN {} TEXT".format(col))
-            except sqlite3.OperationalError:
-                pass
+            except sqlite3.OperationalError as e:
+                if "duplicate column name" not in str(e).lower():
+                    raise
+        for col in ["conflict_analysis_json", "boundary_analysis_json",
+                     "logic_analysis_json"]:
+            try:
+                conn.execute("ALTER TABLE pipeline_state ADD COLUMN {} TEXT".format(col))
+            except sqlite3.OperationalError as e:
+                if "duplicate column name" not in str(e).lower():
+                    raise
         # audit_log table (added post pipeline.py extraction)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS audit_log (
@@ -243,6 +253,35 @@ class Orchestrator:
         conn.close()
         return ok
 
+    def check_and_heartbeat(self, orchestrator_id):
+        """One-shot check for new pipeline events + heartbeat refresh.
+
+        Replaces ``run_monitor()`` for Claude Code agent workflows that
+        cannot run a persistent blocking loop.  Call this once per
+        invocation (e.g. via ``/loop``) and act on the returned items.
+
+        Returns:
+            {"status": "ok", "items": [...]}
+            {"status": "takeover", "items": []}
+        """
+        if not self.send_heartbeat(orchestrator_id):
+            return {"status": "takeover", "items": []}
+
+        items = []
+        for r in self.get_requests_by_stage("request_submitted"):
+            items.append({
+                "type": "new_request",
+                "request_id": r["request_id"],
+                "agent": r["agent"],
+            })
+        for c in self.get_requests_by_stage("completion_submitted"):
+            items.append({
+                "type": "new_completion",
+                "request_id": c["request_id"],
+                "agent": c["agent"],
+            })
+        return {"status": "ok", "items": items}
+
     # ── Pipeline operations ──────────────────────────────────
 
     def init_pipeline(self, agent, reason, scope, plan, self_review, constraints,
@@ -251,9 +290,20 @@ class Orchestrator:
 
         *scope*, *plan*, *self_review*, and *constraints* are Python
         dicts/lists — serialised to JSON internally.
+
+        Raises RuntimeError if *agent* already has an active
+        (non-terminal) pipeline.
         """
+        active = self.get_pending_requests(agent)
+        if active:
+            raise RuntimeError(
+                "Agent '{}' already has active pipeline(s): {}. "
+                "Complete or reject them before starting a new one.".format(
+                    agent, ", ".join(r["request_id"] for r in active)
+                )
+            )
         if tz is None:
-            tz = _tz_plus8()
+            tz = _tz_utc()
         req_id = "{}-{}-{}".format(
             agent,
             datetime.now(tz).strftime('%Y%m%d-%H%M%S'),
@@ -298,6 +348,7 @@ class Orchestrator:
         for key in (
             'scope_json', 'plan_json', 'self_review_json', 'constraints_json',
             'granted_scope_json', 'commits_json', 'context_updates_json',
+            'conflict_analysis_json', 'boundary_analysis_json', 'logic_analysis_json',
         ):
             if result.get(key):
                 try:
@@ -347,66 +398,6 @@ class Orchestrator:
         if row:
             return row[0], row[1]
         return None, None
-
-    # ── Monitor (orchestrator use) ────────────────────────────
-
-    def run_monitor(self, orchestrator_id, heartbeat_interval=30,
-                    poll_interval=2):
-        """Generator yielding ('NEW_REQUEST', req_id) or ('NEW_COMPLETION', req_id).
-
-        Also yields ('HEARTBEAT_FAILED', None) if the orchestrator is taken over.
-        Call get_requests_by_stage() first to clear initial backlog, then
-        use this for incremental detection.
-        """
-        conn = self._connect()
-        last_check = ""
-        last_heartbeat = 0
-
-        # Use SQLite-compatible format (space separator, no T) so
-        # lexicographic compare with updated_at works correctly.
-        _ts_fmt = '%Y-%m-%d %H:%M:%S.%f'
-
-        try:
-            while True:
-                now_check = datetime.now().strftime(_ts_fmt)
-                cur = conn.cursor()
-
-                # Heartbeat via context table
-                now_ts = time.time()
-                if now_ts - last_heartbeat >= heartbeat_interval:
-                    cur.execute("""
-                        UPDATE context
-                        SET orchestrator_heartbeat=datetime('now','localtime')
-                        WHERE id=1 AND orchestrator_id=?
-                    """, (orchestrator_id,))
-                    if cur.rowcount == 0:
-                        yield ("HEARTBEAT_FAILED", None)
-                        return
-                    last_heartbeat = now_ts
-
-                # Incremental scan
-                cur.execute("""
-                    SELECT request_id, 'new_request' AS event_type
-                    FROM pipeline_state
-                    WHERE stage='request_submitted' AND updated_at > ?
-                    UNION ALL
-                    SELECT request_id, 'completion'
-                    FROM pipeline_state
-                    WHERE stage='completion_submitted' AND updated_at > ?
-                """, (last_check, last_check))
-
-                for row in cur.fetchall():
-                    yield (
-                        "NEW_REQUEST" if row[1] == "new_request"
-                        else "NEW_COMPLETION",
-                        row[0],
-                    )
-
-                conn.commit()
-                last_check = now_check
-                time.sleep(poll_interval)
-        finally:
-            conn.close()
 
     # ── Context & boundaries ─────────────────────────────────
 
@@ -458,7 +449,7 @@ class Orchestrator:
     @staticmethod
     def make_request_id(agent, tz=None):
         if tz is None:
-            tz = _tz_plus8()
+            tz = _tz_utc()
         return "{}-{}-{}".format(
             agent,
             datetime.now(tz).strftime('%Y%m%d-%H%M%S'),

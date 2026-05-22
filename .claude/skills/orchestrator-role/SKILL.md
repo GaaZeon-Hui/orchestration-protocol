@@ -10,8 +10,11 @@ description: Orchestrator role. Uses pipeline.py for stage transitions and orche
 **所有 DB 操作通过 `orchestrator.py`，stage 推进统一走 `pipeline.transition_stage()`。** 导入：
 
 ```python
+import json
+
 from orchestrator import Orchestrator
 from pipeline import transition_stage, VALID_TRANSITIONS, ROLE_PERMISSIONS
+from lint import lint_changed_files
 
 orc = Orchestrator()
 ```
@@ -38,8 +41,8 @@ Orchestrator 只能从以下 stage 发起 `transition_stage()`：
 2. 读取模块边界：`orc.get_boundaries()`，若未配置则等待 Worker 配置
 3. 哨兵检查：`git log --oneline -5; git diff --stat`
 4. 查待处理项：`orc.get_requests_by_stage('request_submitted')` + `orc.get_requests_by_stage('completion_submitted')`
-5. 如有待处理 → 立即审查
-6. 启动后台 Monitor
+5. 如有待处理 → 立即审查（跑 lint → 三项分析 → 签发）
+6. 处理完毕后，输出当前无待处理项，建议 `/loop 60s` 持续监控
 
 ### 崩溃恢复
 
@@ -49,18 +52,39 @@ Orchestrator 只能从以下 stage 发起 `transition_stage()`：
 对每个已知 agent：
   pending = orc.get_pending_requests(agent)
   for req in pending:
-      按 req['stage'] 从断点继续审查（已审批跳过分析直接推进，未审批从对应分析阶段补做）
+      读取 req 中的 *_analysis_json 字段
+      缺失某阶段分析 → 补做该阶段
+      已保存 → 跳过，从下一阶段继续
+      按 req['stage'] 从断点继续审查
 ```
 
-### Monitor + 心跳
+### 持续监控 + 心跳（替代 `run_monitor()`）
 
-运行 `orc.run_monitor(orchestrator_id, heartbeat_interval=30, poll_interval=2)`。
+`run_monitor()` 是阻塞 generator，Claude Code agent 无法在后台持续运行。改用 **单次检查 + `/loop` 定时复invoke**：
 
-此方法按 `pipeline_state` stage 过滤，yield `("NEW_REQUEST", request_id)` 或 `("NEW_COMPLETION", request_id)`。
+```python
+result = orc.check_and_heartbeat(orchestrator_id)
 
-- 收到 NEW_REQUEST → stage=`request_submitted` → 开始三项分析
-- 收到 NEW_COMPLETION → stage=`completion_submitted` → 验证
-- 内部每 30s 自动发送心跳。yield `("HEARTBEAT_FAILED", None)` 表示被接管
+if result['status'] == 'takeover':
+    print("心跳失败：已被其他 orchestrator 接管，退出")
+    return
+
+for item in result['items']:
+    if item['type'] == 'new_request':
+        # 拉取 pipeline，跑 lint → 三项分析 → 审批
+        pass
+    elif item['type'] == 'new_completion':
+        # 拉取 pipeline，验证 completion
+        pass
+
+if not result['items']:
+    print("无新事项")
+```
+
+- 每次 `/loop` 复invoke 时，从启动步骤 1 开始，`recover_pipeline()` + `get_requests_by_stage()` 定位到未完成的审查
+- `check_and_heartbeat()` 内部自动调用 `send_heartbeat()` — **每次检查即心跳**
+- 心跳超时 90s，`/loop 60s` 间隔足够在超时前刷新
+- 返回 `status: takeover` 表示被接管，应退出
 
 ## 哨兵检查
 
@@ -68,49 +92,110 @@ Orchestrator 只能从以下 stage 发起 `transition_stage()`：
 git log --oneline -5; git diff --stat
 ```
 
+## Lint 层（程序化预检 — 先于 LLM 分析）
+
+**拿到 request 后，第一步先跑 lint**。Lint 做机械不可漏的检查，不过的直接 reject，不喂给 LLM。
+
+```python
+from lint import lint_changed_files
+
+result = lint_changed_files(
+    boundaries=orc.get_boundaries(),
+    agent=p['agent'],
+    base_ref='HEAD~5'
+)
+if result['blocked']:
+    # 直接 reject，不消耗 LLM context
+    transition_stage(req_id, 'rejected',
+        role='orchestrator', revision=rev, db_path=orc.db_path,
+        approval_status='rejected',
+        rejection_reason=result['reason']
+    )
+    return  # 跳过三项分析
+# 通过后 hints 喂给 LLM 辅助分析
+hints = result['hints']
+```
+
+Lint 做了两件事：
+
+| 层级 | 内容 | 机制 | 行为 |
+|------|------|------|------|
+| **阻塞级** | 越界检查 | `can_touch` / `forbidden` glob 匹配 | 命中 → 直接 reject |
+| **信息级** | 文件冲突 | `git diff base_ref..HEAD` 文件交集 | 提供冲突清单给 LLM 判断 |
+| **信息级** | AST 变更 | 函数签名、新增/删除符号、新类 | 结构化输入给逻辑分析 |
+
+Lint 不过的条件：
+- `boundaries` 未配置 → 阻塞
+- `agent` 不在 boundaries 中 → 阻塞
+- 任一文件命中 `forbidden` → 阻塞
+- 任一文件不匹配 `can_touch` → 阻塞
+
+---
+
 ## 三项核心分析
 
+lint 通过后才进入 LLM 分析阶段。`hints` 已包含结构化的冲突清单和 AST 变更摘要，直接引用即可。
+
 ### 1. 冲突
+- 对照 `hints.conflicts` 中 lint 检测出的文件级冲突
 - vs 已提交 commit、vs 脏文件、vs agent_history 上轮
 - 依赖链追踪：链上任一环节断开即失效
 
-### 2. 越界
+### 2. 越界（边缘 case 判断）
 
-从 `context.boundaries_json` 读取当前项目边界，对照 worker 的 agent 类型和 scope：
+lint 已处理程序化越界。此阶段仅处理 lint 无法判断的边缘 case：
 - 形式上越过边界但方向收敛（让下层调统一入口）→ 可放行
-- 实质性越界（非本模块 agent 改核心文件）→ 阻塞
-- 边界未配置 → 阻塞并要求先由 Worker 配置
+- lint 通过但语义上存在越界风险 → 标记 warning
 
 ### 3. 逻辑变更
+- 对照 `hints.ast` 中的 `new_functions`、`signature_changes`、`deleted_symbols`
 - 新增函数/参数？签名变更向后兼容？API 字段退化？
 - 硬编码替代计算？（`None` 替代 `get_ordinal()` — 数据丢失）
 - **入口复用时字段映射遗漏** ← 高频
 
-分析过程中推进 pipeline stage。**每次推进前先读当前 revision，调用 `transition_stage()` 后取回新 revision：**
+分析过程中推进 pipeline stage。**每次推进前先读当前 revision，调用 `transition_stage()` 后取回新 revision。每步分析结论序列化为 JSON 存入对应字段，供崩溃恢复复用：**
 
 ```python
 # 先读
 p = orc.get_pipeline(req_id)
 rev, stage = p['revision'], p['stage']
 
-# 推进分析阶段
+# 冲突分析 — 保存结论
 rev, stage = transition_stage(
     req_id, 'conflict_analysis_done',
-    role='orchestrator', revision=rev, db_path=orc.db_path
+    role='orchestrator', revision=rev, db_path=orc.db_path,
+    conflict_analysis_json=json.dumps({
+        'conflicts_found': [...],
+        'resolution': '...',
+    }, ensure_ascii=False),
 )
 
-# 边界分析
+# 边界分析 — 保存结论
 rev, stage = transition_stage(
     req_id, 'boundary_analysis_done',
-    role='orchestrator', revision=rev, db_path=orc.db_path
+    role='orchestrator', revision=rev, db_path=orc.db_path,
+    boundary_analysis_json=json.dumps({
+        'edge_cases': [...],
+        'released': [...],
+        'warnings': [...],
+    }, ensure_ascii=False),
 )
 
-# 逻辑分析
+# 逻辑分析 — 保存结论
 rev, stage = transition_stage(
     req_id, 'logic_analysis_done',
-    role='orchestrator', revision=rev, db_path=orc.db_path
+    role='orchestrator', revision=rev, db_path=orc.db_path,
+    logic_analysis_json=json.dumps({
+        'new_functions': [...],
+        'signature_changes': [...],
+        'deleted_symbols': [...],
+        'breaking_changes': [...],
+        'field_mapping_issues': [...],
+    }, ensure_ascii=False),
 )
 ```
+
+崩溃恢复时读取这些字段，跳过已完成的分析阶段，直接续跑。若字段缺失（旧 pipeline 无此列），则从该阶段补做。
 
 ## 签发审批
 
@@ -196,7 +281,7 @@ for row in db.execute('SELECT * FROM audit_log WHERE request_id=? ORDER BY creat
 | 越界 | 阻塞 + 分析方向 → 汇报 |
 | completion 漏报 | 报告漏报项 + 影响链 → 等用户裁决 |
 | WAL 文件过大 | `PRAGMA wal_checkpoint(TRUNCATE)` |
-| 心跳失败 | `run_monitor()` yield HEARTBEAT_FAILED → 降级或退出 |
+| 心跳失败 | `check_and_heartbeat()` 返回 `status: takeover` → 退出 |
 | 崩溃后重启 | `orc.recover_pipeline(agent)` → 按断点 stage 续跑 |
 
 ## 关键原则

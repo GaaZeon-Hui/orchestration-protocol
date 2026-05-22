@@ -38,12 +38,12 @@ Worker 只能从以下 stage 发起 `transition_stage()`：
 | 2. Pull + Read | git pull, 当前状态, 边界 | `orc.get_pipeline(req_id)` / `orc.get_boundaries()` |
 | 3. Check | 确认同 agent 无 modifying 冲突 | `orc.get_pending_requests(agent)` |
 | 4. Init | 创建 pipeline | `orc.init_pipeline(...)` |
-| 5. Monitor | 轮询等待审批 | poll `orc.get_pipeline(req_id)` 直至 stage=approved/rejected |
+| 5. Check approval | 检查审批状态（单次，未审批则 `/loop` 复invoke） | `orc.get_pipeline(req_id)` |
 | 6. Read approval | 查审批结果 | `orc.get_pipeline(req_id)` → `granted_scope_json` |
 | 7. Modify | 仅修改授权文件，对照模块边界 | `transition_stage(req_id, 'modifying', role='worker', ...)` |
 | 8. Self-review | 自审越界和逻辑变更 | → `transition_stage(req_id, 'self_review_done', role='worker', ...)` |
-| 9a. Submit completion | 提交 completion，等 Orchestrator 验证 | `transition_stage(req_id, 'completion_submitted', role='worker', ...)` |
-| 9b. Release lock | Orchestrator 验证通过后释锁 | `transition_stage(req_id, 'lock_released', role='worker', ...)` |
+| 9a. Submit completion | 提交 completion | `transition_stage(req_id, 'completion_submitted', role='worker', ...)` |
+| 9b. Wait verify | 等 Orchestrator 验证后释锁（单次检查） | `orc.get_pipeline(req_id)` → `transition_stage(..., 'lock_released')` |
 
 ## Step 0: 配置模块边界
 
@@ -77,10 +77,11 @@ pipeline = orc.recover_pipeline('md-agent')
 ```
 
 有未完成 pipeline → 从 `stage` 断点续跑：
-- `request_submitted` → 跳到 Step 5（等审批）
+- `request_submitted` → 跳到 Step 5（检查审批，未审批则 `/loop` 复invoke）
 - `approved` → 跳到 Step 7（执行修改）
 - `modifying` / `self_review_done` → 从对应 stage 继续
-- `completion_submitted` / `completed` → 跳到 Step 9（释锁）
+- `completion_submitted` → 跳到 Step 9b（等 orchestrator 验证）
+- `completed` → 直接 `transition_stage(req_id, 'lock_released', role='worker', ...)`
 
 ## Step 2: Pull + 读取状态
 
@@ -110,20 +111,31 @@ req_id = orc.init_pipeline(
 
 Agent types: `engine-agent` | `service-agent` | `ui-agent` | `md-agent` | `py-agent`
 
-## Step 5: 监视审批
+## Step 5: 检查审批状态
+
+**每次调用只查一次，不阻塞轮询。** 若尚未审批，汇报当前 stage 后结束——用 `/loop` 定时复invoke 本角色继续检查。
 
 ```python
-while True:
-    p = orc.get_pipeline(req_id)
-    if p['stage'] in ('approved', 'approved-with-warning'):
-        break
-    if p['stage'] == 'rejected':
-        print(f"被拒: {p.get('rejection_reason')}")
-        return
-    time.sleep(2)
+p = orc.get_pipeline(req_id)
+stage = p['stage']
+
+if stage == 'rejected':
+    print(f"被拒: {p.get('rejection_reason')}")
+    return  # 流程终止
+
+if stage in ('approved',):
+    # 审批通过 → 继续 Step 6
+    pass
+else:
+    # 仍在等待（request_submitted / conflict_analysis_done / ...）
+    print(f"当前 stage: {stage}，等待 orchestrator 审批中")
+    print("建议: /loop 30s 继续检查审批状态")
+    return  # 本次调用结束，/loop 会在 30s 后重新 invoke
 ```
 
 WAL 模式下 Orchestrator 的 `transition_stage()` 不会阻塞 Worker 的 `get_pipeline()` SELECT。
+
+**重要**：`/loop` 复invoke 时，Worker 应从 Step 1（崩溃恢复）开始，`recover_pipeline()` 会定位到当前 stage，然后跳回 Step 5 继续等审批——不需要重新 `init_pipeline()`。
 
 ## Step 6: 读取审批详情
 
@@ -142,54 +154,78 @@ rev, stage = transition_stage(
 )
 ```
 
-仅修改授权 scope 中的文件。完成后：
+仅修改授权 scope 中的文件。修改完成后进入 Step 8 自审。
+
+## Step 8: 自审
+
+自审越界（对照 `orc.get_boundaries()`）和逻辑变更。完成后推进 stage：
 
 ```python
 rev, stage = transition_stage(
     req_id, 'self_review_done',
-    role='worker', revision=rev, db_path=orc.db_path
+    role='worker', revision=rev, db_path=orc.db_path,
+    self_review_json=json.dumps({
+        'files_modified': [...],
+        'files_not_in_scope': [],
+        'new_functions_created': [],
+        'breaking_changes': [],
+        'constraints_violated': [],
+        'potential_issues': [],
+    }, ensure_ascii=False),
 )
 ```
 
-## Step 8: 自审
+## Step 9: 提交 Completion + 等验证释锁
 
-自审越界（对照 `orc.get_boundaries()`）和逻辑变更。
-
-## Step 9: 提交 Completion + 释锁
+### 9a. 提交 Completion
 
 ```python
 rev, stage = transition_stage(
     req_id, 'completion_submitted',
     role='worker', revision=rev, db_path=orc.db_path,
-    self_review_json=json.dumps({
-        'all_steps_completed': True, 'files_modified': [...],
-        'files_not_in_scope': [], 'new_functions_created': [],
-        'breaking_changes': [], 'constraints_violated': [], 'engine_files_touched': []
-    }, ensure_ascii=False),
     commits_json=json.dumps([...], ensure_ascii=False),
     sync_notes='...',
     context_updates_json=json.dumps({...}, ensure_ascii=False)
 )
-
-# 等待 Orchestrator 验证 completion 后释锁
-while True:
-    p = orc.get_pipeline(req_id)
-    if p['stage'] == 'completed':
-        rev = p['revision']
-        transition_stage(
-            req_id, 'lock_released',
-            role='worker', revision=rev, db_path=orc.db_path
-        )
-        break
-    time.sleep(2)
 ```
 
-self_review 格式：
+### 9b. 等待 Orchestrator 验证
+
+**每次调用只查一次。** 跟 Step 5 同理，不阻塞轮询：
+
+```python
+p = orc.get_pipeline(req_id)
+stage = p['stage']
+
+if stage == 'completed':
+    rev = p['revision']
+    transition_stage(
+        req_id, 'lock_released',
+        role='worker', revision=rev, db_path=orc.db_path
+    )
+    print("锁已释放，流程结束")
+    return
+
+if stage == 'rejected':
+    print(f"completion 被拒: {p.get('rejection_reason')}")
+    return
+
+# 仍在等待
+print(f"当前 stage: {stage}，等待 orchestrator 验证 completion")
+print("建议: /loop 30s 继续检查")
+```
+
+**注意**：`/loop` 复invoke 时，Worker 从 Step 1 恢复，`recover_pipeline()` 返回 `completion_submitted`，直接跳回 Step 9b 继续等。
+
+self_review 格式（在 Step 8 `self_review_done` 时传入）：
 ```json
 {
-  "all_steps_completed": true, "files_modified": [...],
-  "files_not_in_scope": [], "new_functions_created": [],
-  "breaking_changes": [], "constraints_violated": [], "engine_files_touched": []
+  "files_modified": [...],
+  "files_not_in_scope": [],
+  "new_functions_created": [],
+  "breaking_changes": [],
+  "constraints_violated": [],
+  "potential_issues": []
 }
 ```
 
@@ -201,10 +237,10 @@ self_review 格式：
 
 | 断点 stage | 操作 |
 |------------|------|
-| `request_submitted` | 跳回 Step 5 等审批 |
+| `request_submitted` | 跳回 Step 5 检查审批（未审批则建议 `/loop`） |
 | `approved` | 跳回 Step 7 执行修改 |
 | `modifying` | 检查 git status，有未提交修改则继续，否则从 Step 7 重做 |
 | `self_review_done` | 跳回 Step 8 重做自审，然后 Step 9 |
-| `completion_submitted` | 跳回 Step 9 等 Orchestrator 验证 |
+| `completion_submitted` | 跳回 Step 9b 等 Orchestrator 验证 |
 | `completed` | 直接 `transition_stage(req_id, 'lock_released', role='worker', ...)` |
 | `lock_released` | 已完成，跳过 |

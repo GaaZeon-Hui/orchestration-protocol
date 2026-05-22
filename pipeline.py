@@ -43,6 +43,7 @@ ALLOWED_COLUMNS = {
     'approval_status', 'granted_scope_json', 'rejection_reason',
     'reviewed_by',
     'completed_at', 'commits_json', 'sync_notes', 'context_updates_json',
+    'conflict_analysis_json', 'boundary_analysis_json', 'logic_analysis_json',
 }
 
 TERMINAL_STAGES = {'rejected', 'lock_released'}
@@ -109,6 +110,15 @@ def transition_stage(request_id, new_stage, role, revision, db_path, **kwargs):
                 role, current_stage,
             )
         )
+
+    # modifying → self_review_done must carry evidence of changes
+    if current_stage == 'modifying' and new_stage == 'self_review_done':
+        if not kwargs.get('self_review_json'):
+            conn.close()
+            raise ValueError(
+                "self_review_json is required when advancing from "
+                "modifying to self_review_done"
+            )
 
     # Whitelist filter kwargs
     filtered = {k: v for k, v in kwargs.items() if k in ALLOWED_COLUMNS}

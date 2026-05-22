@@ -7,7 +7,7 @@ import time
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from orchestrator import Orchestrator, _tz_plus8
+from orchestrator import Orchestrator, _tz_utc
 from pipeline import (
     transition_stage,
     VALID_TRANSITIONS,
@@ -33,7 +33,7 @@ class TestTransitionStage(unittest.TestCase):
         self.orc = Orchestrator(TEST_DB)
         self.orc.init_db()
         self.orc.migrate()
-        self.tz = _tz_plus8()
+        self.tz = _tz_utc()
 
     def tearDown(self):
         self.orc = None
@@ -192,7 +192,7 @@ class TestTransitionStage(unittest.TestCase):
             ("approved", "orchestrator", {"approval_status": "approved",
                                            "granted_scope_json": json.dumps({"files": ["x.py"]})}),
             ("modifying", "worker"),
-            ("self_review_done", "worker"),
+            ("self_review_done", "worker", {"self_review_json": json.dumps({"done": True})}),
             ("completion_submitted", "worker", {"commits_json": json.dumps(["abc"])}),
             ("completed", "orchestrator"),
             ("lock_released", "worker"),
@@ -266,6 +266,68 @@ class TestTransitionStage(unittest.TestCase):
         conn.close()
         for col in ALLOWED_COLUMNS:
             self.assertIn(col, cols, "{} not a real pipeline_state column".format(col))
+
+    def test_self_review_done_requires_self_review_json(self):
+        """modifying → self_review_done must include self_review_json kwarg."""
+        req_id = self.orc.init_pipeline(
+            "py-agent", "r",
+            {"files": ["x.py"], "modules": [], "excluded": []},
+            {"summary": "x", "steps": [], "breaking_changes": False},
+            {"potential_issues": []}, [], self.tz,
+        )
+        p = self.orc.get_pipeline(req_id)
+        rev = p["revision"]
+
+        # Advance to modifying (approval flow)
+        rev, _ = transition_stage(req_id, "conflict_analysis_done", "orchestrator", rev, self.orc.db_path)
+        rev, _ = transition_stage(req_id, "boundary_analysis_done", "orchestrator", rev, self.orc.db_path)
+        rev, _ = transition_stage(req_id, "logic_analysis_done", "orchestrator", rev, self.orc.db_path)
+        rev, _ = transition_stage(
+            req_id, "approved", "orchestrator", rev, self.orc.db_path,
+            approval_status="approved",
+        )
+        rev, _ = transition_stage(req_id, "modifying", "worker", rev, self.orc.db_path)
+
+        # Should fail without self_review_json
+        with self.assertRaises(ValueError) as ctx:
+            transition_stage(req_id, "self_review_done", "worker", rev, self.orc.db_path)
+        self.assertIn("self_review_json is required", str(ctx.exception))
+
+    def test_analysis_columns_persist(self):
+        """Analysis JSON columns are writable via transition_stage kwargs."""
+        req_id = self.orc.init_pipeline(
+            "py-agent", "r",
+            {"files": ["x.py"], "modules": [], "excluded": []},
+            {"summary": "x", "steps": [], "breaking_changes": False},
+            {"potential_issues": []}, [], self.tz,
+        )
+        p = self.orc.get_pipeline(req_id)
+        rev = p["revision"]
+
+        conflict_data = json.dumps({"conflicts": ["a.py"]}, ensure_ascii=False)
+        rev, _ = transition_stage(
+            req_id, "conflict_analysis_done", "orchestrator", rev, self.orc.db_path,
+            conflict_analysis_json=conflict_data,
+        )
+
+        p2 = self.orc.get_pipeline(req_id)
+        self.assertEqual(p2["conflict_analysis_json"], {"conflicts": ["a.py"]})
+
+        boundary_data = json.dumps({"warnings": ["edge case in core"]}, ensure_ascii=False)
+        rev, _ = transition_stage(
+            req_id, "boundary_analysis_done", "orchestrator", rev, self.orc.db_path,
+            boundary_analysis_json=boundary_data,
+        )
+
+        logic_data = json.dumps({"new_functions": ["foo"]}, ensure_ascii=False)
+        rev, _ = transition_stage(
+            req_id, "logic_analysis_done", "orchestrator", rev, self.orc.db_path,
+            logic_analysis_json=logic_data,
+        )
+
+        p3 = self.orc.get_pipeline(req_id)
+        self.assertEqual(p3["boundary_analysis_json"], {"warnings": ["edge case in core"]})
+        self.assertEqual(p3["logic_analysis_json"], {"new_functions": ["foo"]})
 
 
 if __name__ == "__main__":

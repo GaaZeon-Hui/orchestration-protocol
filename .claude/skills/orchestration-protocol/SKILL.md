@@ -12,7 +12,7 @@ description: Entry point. Determines role via heartbeat and redirects to role-sp
 
 ## 架构
 
-单表 `pipeline_state` + `context` + `audit_log` 三表。独立模块 `pipeline.py` 提供 `transition_stage()`（CAS + 权限校验 + 审计）。旧 5 表（`lock`, `requests`, `approvals`, `completions`, `processed`）已移除。
+单表 `pipeline_state` + `context` + `audit_log` 三表。独立模块 `pipeline.py` 提供 `transition_stage()`（CAS + 权限校验 + 审计），`lint.py` 提供程序化预检（越界 glob 匹配 + 文件冲突检测 + AST 变更提取）。旧 5 表（`lock`, `requests`, `approvals`, `completions`, `processed`）已移除。
 
 ## 角色注册
 
@@ -22,8 +22,8 @@ description: Entry point. Determines role via heartbeat and redirects to role-sp
 2. 初始化：`orc.init_db()` → `orc.migrate()`
 3. 检查存活：`orc.check_orchestrator_alive()` → `(is_alive, orch_id)`
 4. 存活 → **worker**。否则调用 `orc.try_register()` 抢注。
-5. 抢注成功 → **orchestrator**，立即读 `orchestrator-role.md`
-   抢注失败/已存活 → **worker**，立即读 `worker-role.md`
+5. 抢注成功 → **orchestrator** → 立即调用 `Skill(skill="orchestrator-role")`
+   抢注失败/已存活 → **worker** → 立即调用 `Skill(skill="worker-role")`
 
 两个 agent 同时抢注时，SQLite 行级锁保证仅一个成功。
 
@@ -84,6 +84,11 @@ CREATE TABLE IF NOT EXISTS pipeline_state (
     completed_at TEXT, commits_json TEXT,
     sync_notes TEXT, context_updates_json TEXT,
 
+    -- 分析中间态（崩溃恢复用）
+    conflict_analysis_json TEXT,
+    boundary_analysis_json TEXT,
+    logic_analysis_json TEXT,
+
     created_at TEXT DEFAULT (datetime('now','localtime')),
     updated_at TEXT DEFAULT (datetime('now','localtime'))
 );
@@ -107,6 +112,9 @@ CREATE TABLE IF NOT EXISTS context (
     last_commit TEXT, agent_history_json TEXT DEFAULT '[]',
     warnings_json TEXT DEFAULT '[]', boundaries_json TEXT,
     pipeline TEXT, api_contract TEXT, meta_fields TEXT,
+    orchestrator_id TEXT,
+    orchestrator_heartbeat TEXT,
+    orchestrator_started_at TEXT,
     updated_at TEXT DEFAULT (datetime('now','localtime'))
 );
 INSERT OR IGNORE INTO context (id) VALUES (1);
@@ -121,6 +129,8 @@ INSERT OR IGNORE INTO context (id) VALUES (1);
 | 函数 | 模块 | 说明 |
 |------|------|------|
 | `transition_stage(req_id, new_stage, role, revision, db_path, **kwargs)` | `pipeline.py` | 唯一 stage 推进入口，含权限+审计 |
+| `run_lint(files_changed, boundaries, agent, base_ref)` | `lint.py` | 越界检查+冲突检测+AST hints，过不了直接 reject |
+| `lint_changed_files(boundaries, agent, base_ref)` | `lint.py` | 便捷函数：git diff --name-only → run_lint() |
 | `init_pipeline(agent, reason, scope, plan, self_review, constraints, tz)` | `orchestrator.py` | 创建 pipeline |
 | `get_pipeline(request_id)` | `orchestrator.py` | 查询单条 pipeline |
 | `get_pending_requests(agent)` | `orchestrator.py` | 查未完成 pipeline |

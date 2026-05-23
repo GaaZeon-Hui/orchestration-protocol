@@ -104,6 +104,7 @@ class Orchestrator:
                 orchestrator_id TEXT,
                 orchestrator_heartbeat TEXT,
                 orchestrator_started_at TEXT,
+                orchestrator_current_task TEXT,
                 updated_at TEXT DEFAULT (datetime('now','localtime'))
             );
             INSERT OR IGNORE INTO context (id) VALUES (1);
@@ -153,7 +154,8 @@ class Orchestrator:
         """Add missing columns and tables from older versions."""
         conn = self._connect()
         for col in ["orchestrator_id", "orchestrator_heartbeat",
-                     "orchestrator_started_at", "boundaries_json"]:
+                     "orchestrator_started_at", "orchestrator_current_task",
+                     "boundaries_json"]:
             try:
                 conn.execute("ALTER TABLE context ADD COLUMN {} TEXT".format(col))
             except sqlite3.OperationalError as e:
@@ -281,6 +283,42 @@ class Orchestrator:
                 "agent": c["agent"],
             })
         return {"status": "ok", "items": items}
+
+    def set_current_task(self, request_id, task_type):
+        """Record what the orchestrator is currently working on.
+        Cleared by clear_current_task() when done.
+        """
+        conn = self._connect()
+        conn.execute(
+            "UPDATE context SET orchestrator_current_task = ? WHERE id = 1",
+            (json.dumps({"request_id": request_id, "type": task_type,
+                         "started_at": datetime.now(timezone.utc).isoformat()}),),
+        )
+        conn.commit()
+        conn.close()
+
+    def clear_current_task(self):
+        """Clear the current task record. Call when work is complete."""
+        conn = self._connect()
+        conn.execute(
+            "UPDATE context SET orchestrator_current_task = NULL WHERE id = 1"
+        )
+        conn.commit()
+        conn.close()
+
+    def get_current_task(self):
+        """Return the last unfinished task dict, or None."""
+        conn = self._connect()
+        row = conn.execute(
+            "SELECT orchestrator_current_task FROM context WHERE id = 1"
+        ).fetchone()
+        conn.close()
+        if row and row[0]:
+            try:
+                return json.loads(row[0])
+            except (json.JSONDecodeError, TypeError):
+                pass
+        return None
 
     def resolve_orphan_locks(self, timeout_seconds=120):
         """Release locks on completed pipelines that have not been

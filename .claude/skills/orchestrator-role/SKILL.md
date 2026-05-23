@@ -39,12 +39,14 @@ Orchestrator 只能从以下 stage 发起 `transition_stage()`：
 加载后立即执行：
 
 1. 初始化：`orc.init_db()` → `orc.migrate()`
-2. 读取模块边界：`orc.get_boundaries()`，若未配置则等待 Worker 配置
-3. **打开任务板**：建议用户在另一个终端运行 `python status.py` 持续监控 pipeline 状态
-4. 哨兵检查：`git log --oneline -5; git diff --stat`
-5. 查待处理项：`orc.get_requests_by_stage('request_submitted')` + `orc.get_requests_by_stage('completion_submitted')`
-6. 如有待处理 → 立即审查（跑 lint → 三项分析 → 签发）
-7. 处理完毕后，输出当前无待处理项，建议 `/loop 60s` 持续监控
+2. **恢复工作现场**：`task = orc.get_current_task()` — 若有未完成任务，先处理完
+3. 读取模块边界：`orc.get_boundaries()`，若未配置则等待 Worker 配置
+4. **打开任务板**：建议用户在另一个终端运行 `python status.py` 持续监控 pipeline 状态
+5. 哨兵检查：`git log --oneline -5; git diff --stat`
+6. 查待处理项：`orc.get_requests_by_stage('request_submitted')` + `orc.get_requests_by_stage('completion_submitted')`
+7. 如有待处理 → 立即审查（跑 lint → 三项分析 → 签发）
+8. **自验证**：`python status.py --check-stuck` — 有 stuck 项说明自己漏了，立即补处理
+9. 处理完毕后，输出当前无待处理项，建议 `/loop 60s` 持续监控
 
 ### 崩溃恢复
 
@@ -78,18 +80,35 @@ if orphans:
 
 for item in result['items']:
     if item['type'] == 'new_request':
+        orc.set_current_task(item['request_id'], 'review')
         # 拉取 pipeline，跑 lint → 三项分析 → 审批
-        pass
+        orc.clear_current_task()
     elif item['type'] == 'new_completion':
+        orc.set_current_task(item['request_id'], 'verify')
         # 拉取 pipeline，验证 completion
-        pass
+        orc.clear_current_task()
 
-if not result['items'] and not orphans:
+# 自验证 — 查自己有没有漏掉的 completion_submitted
+import subprocess, json
+r = subprocess.run(
+    ["python", "status.py", "--check-stuck", orc.db_path, "10"],
+    capture_output=True, text=True
+)
+stuck = json.loads(r.stdout).get("stuck", [])
+for s in stuck:
+    # 漏了 — 立即补处理
+    orc.set_current_task(s['request_id'], 'verify-stuck')
+    # 验证 completion
+    orc.clear_current_task()
+
+if not result['items'] and not orphans and not stuck:
     print("无新事项")
 ```
 
 - 每次 `/loop` 复invoke 时，从启动步骤 1 开始，`recover_pipeline()` + `get_requests_by_stage()` 定位到未完成的审查
 - `check_and_heartbeat()` 内部自动调用 `send_heartbeat()` — **每次检查即心跳**
+- `set_current_task()` / `clear_current_task()` — 崩溃恢复知道"我当时在处理什么"
+- `--check-stuck` 只查 `stage='completion_submitted' AND updated_at < now-10min`，零开销
 - `resolve_orphan_locks()` 只查 `stage='completed' AND updated_at < now-120s`，零开销
 - 心跳超时 90s，`/loop 60s` 间隔足够在超时前刷新
 - 返回 `status: takeover` 表示被接管，应退出

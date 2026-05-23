@@ -455,7 +455,22 @@ class TestPipelineOrchestrator(unittest.TestCase):
         self.assertTrue(rid.startswith("py-agent-"))
         self.assertEqual(len(rid.split("-")), 5)
 
-    # ── 13. Orphan lock resolution ──────────────────────────
+    # ── 13. Work journal ────────────────────────────────────
+
+    def test_current_task_roundtrip(self):
+        self.orc.set_current_task("req-123", "review")
+        task = self.orc.get_current_task()
+        self.assertEqual(task["request_id"], "req-123")
+        self.assertEqual(task["type"], "review")
+        self.assertIn("started_at", task)
+
+        self.orc.clear_current_task()
+        self.assertIsNone(self.orc.get_current_task())
+
+    def test_current_task_none_by_default(self):
+        self.assertIsNone(self.orc.get_current_task())
+
+    # ── 14. Orphan lock resolution ──────────────────────────
 
     def test_resolve_orphan_locks_releases_stale_completed(self):
         req_id = self.orc.init_pipeline(
@@ -529,6 +544,71 @@ class TestPipelineOrchestrator(unittest.TestCase):
 
         p = self.orc.get_pipeline(req_id)
         self.assertEqual(p["stage"], "completed")
+
+    def test_check_stuck_script(self):
+        from status import check_stuck
+        req_id = self.orc.init_pipeline(
+            "py-agent", "r",
+            {"files": ["x.py"], "modules": [], "excluded": []},
+            {"summary": "x", "steps": [], "breaking_changes": False},
+            {"potential_issues": []}, [], self.tz,
+        )
+        p = self.orc.get_pipeline(req_id)
+        rev = p["revision"]
+        for stage in ("conflict_analysis_done", "boundary_analysis_done",
+                      "logic_analysis_done"):
+            rev, _ = transition_stage(
+                req_id, stage, "orchestrator", rev, self.orc.db_path)
+        rev, _ = transition_stage(
+            req_id, "approved", "orchestrator", rev, self.orc.db_path,
+            approval_status="approved")
+        rev, _ = transition_stage(req_id, "modifying", "worker", rev, self.orc.db_path)
+        rev, _ = transition_stage(
+            req_id, "self_review_done", "worker", rev, self.orc.db_path,
+            self_review_json=json.dumps({"done": True}))
+        rev, _ = transition_stage(
+            req_id, "completion_submitted", "worker", rev, self.orc.db_path)
+
+        # Age it past 10 minutes
+        conn = self.orc._connect()
+        conn.execute(
+            "UPDATE pipeline_state SET updated_at=datetime('now','localtime','-15 minutes') "
+            "WHERE request_id=?", (req_id,)
+        )
+        conn.commit()
+        conn.close()
+
+        stuck = check_stuck(self.orc.db_path, timeout_minutes=10)
+        self.assertEqual(len(stuck), 1)
+        self.assertEqual(stuck[0]["request_id"], req_id)
+
+    def test_check_stuck_ignores_fresh(self):
+        from status import check_stuck
+        req_id = self.orc.init_pipeline(
+            "py-agent", "r",
+            {"files": ["x.py"], "modules": [], "excluded": []},
+            {"summary": "x", "steps": [], "breaking_changes": False},
+            {"potential_issues": []}, [], self.tz,
+        )
+        p = self.orc.get_pipeline(req_id)
+        rev = p["revision"]
+        for stage in ("conflict_analysis_done", "boundary_analysis_done",
+                      "logic_analysis_done"):
+            rev, _ = transition_stage(
+                req_id, stage, "orchestrator", rev, self.orc.db_path)
+        rev, _ = transition_stage(
+            req_id, "approved", "orchestrator", rev, self.orc.db_path,
+            approval_status="approved")
+        rev, _ = transition_stage(req_id, "modifying", "worker", rev, self.orc.db_path)
+        rev, _ = transition_stage(
+            req_id, "self_review_done", "worker", rev, self.orc.db_path,
+            self_review_json=json.dumps({"done": True}))
+        rev, _ = transition_stage(
+            req_id, "completion_submitted", "worker", rev, self.orc.db_path)
+
+        # Just submitted — should not be stuck
+        stuck = check_stuck(self.orc.db_path, timeout_minutes=10)
+        self.assertEqual(len(stuck), 0)
 
     def test_check_orphans_script(self):
         from status import check_orphans

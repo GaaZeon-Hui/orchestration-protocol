@@ -188,6 +188,37 @@ def check_orphans(db_path=".claude/orchestrator/orchestrator.db",
     return orphans
 
 
+def check_stuck(db_path=".claude/orchestrator/orchestrator.db",
+                timeout_minutes=10):
+    """Return list of completion_submitted pipelines that have not been
+    processed within *timeout_minutes*.  These are completions the
+    orchestrator should have handled but didn't — self-verification.
+    """
+    import json
+    conn = _open_ro(db_path)
+    if conn is None:
+        print(json.dumps({"stuck": []}))
+        return []
+
+    rows = conn.execute("""
+        SELECT request_id, agent, updated_at,
+               CAST((julianday('now','localtime')
+                     - julianday(updated_at)) * 1440 AS INTEGER) AS age_min
+        FROM pipeline_state
+        WHERE stage = 'completion_submitted'
+          AND updated_at < datetime('now','localtime','-%d minutes')
+    """ % timeout_minutes).fetchall()
+    conn.close()
+
+    stuck = [
+        {"request_id": r["request_id"], "agent": r["agent"],
+         "updated_at": r["updated_at"], "age_min": r["age_min"]}
+        for r in rows
+    ]
+    print(json.dumps({"stuck": stuck}, ensure_ascii=False))
+    return stuck
+
+
 def _clear():
     os.system("cls" if os.name == "nt" else "clear")
 
@@ -200,6 +231,10 @@ if __name__ == "__main__":
         db = sys.argv[2] if len(sys.argv) > 2 else ".claude/orchestrator/orchestrator.db"
         timeout = int(sys.argv[3]) if len(sys.argv) > 3 else 120
         check_orphans(db, timeout)
+    elif len(sys.argv) > 1 and sys.argv[1] == "--check-stuck":
+        db = sys.argv[2] if len(sys.argv) > 2 else ".claude/orchestrator/orchestrator.db"
+        timeout = int(sys.argv[3]) if len(sys.argv) > 3 else 10
+        check_stuck(db, timeout)
     else:
         db = sys.argv[1] if len(sys.argv) > 1 else ".claude/orchestrator/orchestrator.db"
         sec = int(sys.argv[2]) if len(sys.argv) > 2 else 3

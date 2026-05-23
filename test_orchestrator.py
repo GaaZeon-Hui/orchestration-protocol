@@ -455,6 +455,37 @@ class TestPipelineOrchestrator(unittest.TestCase):
         self.assertTrue(rid.startswith("py-agent-"))
         self.assertEqual(len(rid.split("-")), 5)
 
+    # ── 13. Status dashboard (read-only) ─────────────────────
+
+    def test_status_reads_pipeline_data(self):
+        from status import _open_ro, _fetch_all, _max_audit_id
+        req_id = self.orc.init_pipeline(
+            "status-agent", "test",
+            {"files": ["x.py"], "modules": [], "excluded": []},
+            {"summary": "x", "steps": [], "breaking_changes": False},
+            {"potential_issues": []}, [], self.tz,
+        )
+        conn = _open_ro(self.orc.db_path)
+        self.assertIsNotNone(conn)
+        pipes = _fetch_all(conn)
+        self.assertGreaterEqual(len(pipes), 1)
+        agent_names = {p["agent"] for p in pipes}
+        self.assertIn("status-agent", agent_names)
+        # Only transition_stage() writes audit_log; init_pipeline alone
+        # is an INSERT without a stage change, so audit_log may be empty.
+        audit_id = _max_audit_id(conn)
+        conn.close()
+        # Clean up so other tests aren't blocked
+        p = self.orc.get_pipeline(req_id)
+        rev = p["revision"]
+        for stage in ("conflict_analysis_done", "boundary_analysis_done",
+                      "logic_analysis_done"):
+            rev, _ = transition_stage(
+                req_id, stage, "orchestrator", rev, self.orc.db_path)
+        rev, _ = transition_stage(
+            req_id, "rejected", "orchestrator", rev, self.orc.db_path,
+            approval_status="rejected", rejection_reason="test cleanup")
+
 
 if __name__ == "__main__":
     unittest.main()

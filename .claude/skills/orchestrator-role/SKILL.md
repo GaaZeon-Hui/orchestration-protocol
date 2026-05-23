@@ -39,10 +39,11 @@ Orchestrator 只能从以下 stage 发起 `transition_stage()`：
 
 1. 初始化：`orc.init_db()` → `orc.migrate()`
 2. 读取模块边界：`orc.get_boundaries()`，若未配置则等待 Worker 配置
-3. 哨兵检查：`git log --oneline -5; git diff --stat`
-4. 查待处理项：`orc.get_requests_by_stage('request_submitted')` + `orc.get_requests_by_stage('completion_submitted')`
-5. 如有待处理 → 立即审查（跑 lint → 三项分析 → 签发）
-6. 处理完毕后，输出当前无待处理项，建议 `/loop 60s` 持续监控
+3. **打开任务板**：建议用户在另一个终端运行 `python status.py` 持续监控 pipeline 状态
+4. 哨兵检查：`git log --oneline -5; git diff --stat`
+5. 查待处理项：`orc.get_requests_by_stage('request_submitted')` + `orc.get_requests_by_stage('completion_submitted')`
+6. 如有待处理 → 立即审查（跑 lint → 三项分析 → 签发）
+7. 处理完毕后，输出当前无待处理项，建议 `/loop 60s` 持续监控
 
 ### 崩溃恢复
 
@@ -268,6 +269,18 @@ for row in db.execute('SELECT * FROM audit_log WHERE request_id=? ORDER BY creat
     print(dict(row))
 "
 ```
+
+## 任务板
+
+当用户说 **"看看任务板"** / **"看看状态"** / **"任务面板"** 时，执行：
+
+```bash
+python status.py --once
+```
+
+读取输出并简要总结当前状况（几条 pipeline、各自在什么 stage、有无阻塞项）。不展开分析，仅汇报概览。需要深入时用户会指定 request_id。
+
+若用户说 **"打开任务板"**，提示在另一终端运行 `python status.py` 即可启动持续监控面板。
 
 ## 异常处理
 

@@ -145,14 +145,28 @@ def _render(pipelines, audit_id, last_audit_id):
     print(" Ctrl+C to exit\n")
 
 
+def once(db_path=".claude/orchestrator/orchestrator.db"):
+    """Print status once and exit — for agent invocation."""
+    conn = _open_ro(db_path)
+    pipelines = _fetch_all(conn)
+    audit_id = _max_audit_id(conn)
+    conn.close()
+    _render(pipelines, audit_id, None)
+    return pipelines
+
+
 def _clear():
     os.system("cls" if os.name == "nt" else "clear")
 
 
 if __name__ == "__main__":
-    db = sys.argv[1] if len(sys.argv) > 1 else ".claude/orchestrator/orchestrator.db"
-    sec = int(sys.argv[2]) if len(sys.argv) > 2 else 3
-    try:
-        status(db, sec)
-    except KeyboardInterrupt:
-        print()
+    if len(sys.argv) > 1 and sys.argv[1] == "--once":
+        db = sys.argv[2] if len(sys.argv) > 2 else ".claude/orchestrator/orchestrator.db"
+        once(db)
+    else:
+        db = sys.argv[1] if len(sys.argv) > 1 else ".claude/orchestrator/orchestrator.db"
+        sec = int(sys.argv[2]) if len(sys.argv) > 2 else 3
+        try:
+            status(db, sec)
+        except KeyboardInterrupt:
+            print()

@@ -155,6 +155,39 @@ def once(db_path=".claude/orchestrator/orchestrator.db"):
     return pipelines
 
 
+def check_orphans(db_path=".claude/orchestrator/orchestrator.db",
+                  timeout_seconds=120):
+    """Return list of completed pipelines with stale locks (no release
+    within *timeout_seconds*).  Prints one JSON object and exits.
+
+    Orchestrator calls this each monitoring cycle.  Only when orphans
+    are found does it need to act — otherwise zero overhead.
+    """
+    import json
+    conn = _open_ro(db_path)
+    if conn is None:
+        print(json.dumps({"orphans": []}))
+        return []
+
+    rows = conn.execute("""
+        SELECT request_id, agent, updated_at,
+               CAST((julianday('now','localtime')
+                     - julianday(updated_at)) * 86400 AS INTEGER) AS age_sec
+        FROM pipeline_state
+        WHERE stage = 'completed'
+          AND updated_at < datetime('now','localtime','-%d seconds')
+    """ % timeout_seconds).fetchall()
+    conn.close()
+
+    orphans = [
+        {"request_id": r["request_id"], "agent": r["agent"],
+         "updated_at": r["updated_at"], "age_sec": r["age_sec"]}
+        for r in rows
+    ]
+    print(json.dumps({"orphans": orphans}, ensure_ascii=False))
+    return orphans
+
+
 def _clear():
     os.system("cls" if os.name == "nt" else "clear")
 
@@ -163,6 +196,10 @@ if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--once":
         db = sys.argv[2] if len(sys.argv) > 2 else ".claude/orchestrator/orchestrator.db"
         once(db)
+    elif len(sys.argv) > 1 and sys.argv[1] == "--check-orphans":
+        db = sys.argv[2] if len(sys.argv) > 2 else ".claude/orchestrator/orchestrator.db"
+        timeout = int(sys.argv[3]) if len(sys.argv) > 3 else 120
+        check_orphans(db, timeout)
     else:
         db = sys.argv[1] if len(sys.argv) > 1 else ".claude/orchestrator/orchestrator.db"
         sec = int(sys.argv[2]) if len(sys.argv) > 2 else 3

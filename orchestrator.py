@@ -282,6 +282,35 @@ class Orchestrator:
             })
         return {"status": "ok", "items": items}
 
+    def resolve_orphan_locks(self, timeout_seconds=120):
+        """Release locks on completed pipelines that have not been
+        released within *timeout_seconds*.  Called by orchestrator
+        to prevent indefinite lock leaks when a Worker disappears.
+
+        Returns list of request_ids that were resolved.
+        """
+        conn = self._connect()
+        rows = conn.execute("""
+            SELECT request_id, agent, revision
+            FROM pipeline_state
+            WHERE stage = 'completed'
+              AND updated_at < datetime('now','localtime','-%d seconds')
+        """ % timeout_seconds).fetchall()
+        conn.close()
+
+        resolved = []
+        for row in rows:
+            req_id, agent, rev = row[0], row[1], row[2]
+            try:
+                transition_stage(
+                    req_id, "lock_released", "orchestrator",
+                    rev, self.db_path,
+                )
+                resolved.append(req_id)
+            except (RuntimeError, ValueError, PermissionError):
+                pass
+        return resolved
+
     # ── Pipeline operations ──────────────────────────────────
 
     def init_pipeline(self, agent, reason, scope, plan, self_review, constraints,

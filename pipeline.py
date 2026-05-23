@@ -34,6 +34,7 @@ ROLE_PERMISSIONS = {
         'boundary_analysis_done',
         'logic_analysis_done',
         'completion_submitted',
+        'completed',  # orphan lock takeover
     },
 }
 

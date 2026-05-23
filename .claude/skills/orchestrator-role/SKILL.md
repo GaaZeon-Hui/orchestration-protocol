@@ -30,6 +30,7 @@ Orchestrator 只能从以下 stage 发起 `transition_stage()`：
 | `boundary_analysis_done` | `logic_analysis_done` |
 | `logic_analysis_done` | `approved` / `rejected` |
 | `completion_submitted` | `completed` |
+| `completed` | `lock_released`（孤儿锁接管） |
 
 尝试从 Worker 专属 stage（`approved`, `modifying`, `self_review_done`, `completed`）推进 → `PermissionError`。
 
@@ -70,6 +71,11 @@ if result['status'] == 'takeover':
     print("心跳失败：已被其他 orchestrator 接管，退出")
     return
 
+# 孤儿锁检测 — 仅查 stage='completed' 超时行，轻量
+orphans = orc.resolve_orphan_locks(timeout_seconds=120)
+if orphans:
+    print("释放了 {} 个孤儿锁: {}".format(len(orphans), orphans))
+
 for item in result['items']:
     if item['type'] == 'new_request':
         # 拉取 pipeline，跑 lint → 三项分析 → 审批
@@ -78,12 +84,13 @@ for item in result['items']:
         # 拉取 pipeline，验证 completion
         pass
 
-if not result['items']:
+if not result['items'] and not orphans:
     print("无新事项")
 ```
 
 - 每次 `/loop` 复invoke 时，从启动步骤 1 开始，`recover_pipeline()` + `get_requests_by_stage()` 定位到未完成的审查
 - `check_and_heartbeat()` 内部自动调用 `send_heartbeat()` — **每次检查即心跳**
+- `resolve_orphan_locks()` 只查 `stage='completed' AND updated_at < now-120s`，零开销
 - 心跳超时 90s，`/loop 60s` 间隔足够在超时前刷新
 - 返回 `status: takeover` 表示被接管，应退出
 

@@ -47,6 +47,7 @@ request_submitted → conflict_analysis_done → boundary_analysis_done
 | | `boundary_analysis_done` | `logic_analysis_done` |
 | | `logic_analysis_done` | `approved` / `rejected` |
 | | `completion_submitted` | `completed` |
+| | `completed` | `lock_released`（孤儿锁接管） |
 | **worker** | `approved` | `modifying` |
 | | `modifying` | `self_review_done` |
 | | `self_review_done` | `completion_submitted` |

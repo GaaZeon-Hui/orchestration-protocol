@@ -26,6 +26,7 @@ Worker 只能从以下 stage 发起 `transition_stage()`：
 | `modifying` | `self_review_done` |
 | `self_review_done` | `completion_submitted` |
 | `completed` | `lock_released` |
+| （`completed` 超时未被释锁时，Orchestrator 可接管执行 `completed` → `lock_released`） | |
 
 尝试从 Orchestrator 专属 stage（`request_submitted`, `conflict_analysis_done`, `boundary_analysis_done`, `logic_analysis_done`, `completion_submitted`）推进 → `PermissionError`。
 

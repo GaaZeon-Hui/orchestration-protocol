@@ -455,7 +455,121 @@ class TestPipelineOrchestrator(unittest.TestCase):
         self.assertTrue(rid.startswith("py-agent-"))
         self.assertEqual(len(rid.split("-")), 5)
 
-    # ── 13. Status dashboard (read-only) ─────────────────────
+    # ── 13. Orphan lock resolution ──────────────────────────
+
+    def test_resolve_orphan_locks_releases_stale_completed(self):
+        req_id = self.orc.init_pipeline(
+            "py-agent", "r",
+            {"files": ["x.py"], "modules": [], "excluded": []},
+            {"summary": "x", "steps": [], "breaking_changes": False},
+            {"potential_issues": []}, [], self.tz,
+        )
+        p = self.orc.get_pipeline(req_id)
+        rev = p["revision"]
+        flow = [
+            ("conflict_analysis_done", "orchestrator"),
+            ("boundary_analysis_done", "orchestrator"),
+            ("logic_analysis_done", "orchestrator"),
+            ("approved", "orchestrator", {"approval_status": "approved"}),
+            ("modifying", "worker"),
+            ("self_review_done", "worker", {"self_review_json": json.dumps({"done": True})}),
+            ("completion_submitted", "worker"),
+            ("completed", "orchestrator"),
+        ]
+        for item in flow:
+            new_stage = item[0]
+            role = item[1]
+            kwargs = item[2] if len(item) > 2 else {}
+            rev, _ = transition_stage(req_id, new_stage, role, rev, self.orc.db_path, **kwargs)
+
+        # Artificially age the completed_at / updated_at
+        conn = self.orc._connect()
+        conn.execute(
+            "UPDATE pipeline_state SET updated_at=datetime('now','localtime','-300 seconds') "
+            "WHERE request_id=?", (req_id,)
+        )
+        conn.commit()
+        conn.close()
+
+        # Orchestrator resolves orphan
+        resolved = self.orc.resolve_orphan_locks(timeout_seconds=120)
+        self.assertIn(req_id, resolved)
+
+        p = self.orc.get_pipeline(req_id)
+        self.assertEqual(p["stage"], "lock_released")
+
+    def test_resolve_orphan_locks_ignores_fresh_completed(self):
+        req_id = self.orc.init_pipeline(
+            "py-agent", "r",
+            {"files": ["x.py"], "modules": [], "excluded": []},
+            {"summary": "x", "steps": [], "breaking_changes": False},
+            {"potential_issues": []}, [], self.tz,
+        )
+        p = self.orc.get_pipeline(req_id)
+        rev = p["revision"]
+        for stage in ("conflict_analysis_done", "boundary_analysis_done",
+                      "logic_analysis_done"):
+            rev, _ = transition_stage(
+                req_id, stage, "orchestrator", rev, self.orc.db_path)
+        rev, _ = transition_stage(
+            req_id, "approved", "orchestrator", rev, self.orc.db_path,
+            approval_status="approved")
+        rev, _ = transition_stage(req_id, "modifying", "worker", rev, self.orc.db_path)
+        rev, _ = transition_stage(
+            req_id, "self_review_done", "worker", rev, self.orc.db_path,
+            self_review_json=json.dumps({"done": True}))
+        rev, _ = transition_stage(
+            req_id, "completion_submitted", "worker", rev, self.orc.db_path)
+        rev, _ = transition_stage(
+            req_id, "completed", "orchestrator", rev, self.orc.db_path)
+
+        # Just completed — should NOT be resolved (not stale yet)
+        resolved = self.orc.resolve_orphan_locks(timeout_seconds=120)
+        self.assertNotIn(req_id, resolved)
+
+        p = self.orc.get_pipeline(req_id)
+        self.assertEqual(p["stage"], "completed")
+
+    def test_check_orphans_script(self):
+        from status import check_orphans
+        req_id = self.orc.init_pipeline(
+            "py-agent", "r",
+            {"files": ["x.py"], "modules": [], "excluded": []},
+            {"summary": "x", "steps": [], "breaking_changes": False},
+            {"potential_issues": []}, [], self.tz,
+        )
+        p = self.orc.get_pipeline(req_id)
+        rev = p["revision"]
+        for stage in ("conflict_analysis_done", "boundary_analysis_done",
+                      "logic_analysis_done"):
+            rev, _ = transition_stage(
+                req_id, stage, "orchestrator", rev, self.orc.db_path)
+        rev, _ = transition_stage(
+            req_id, "approved", "orchestrator", rev, self.orc.db_path,
+            approval_status="approved")
+        rev, _ = transition_stage(req_id, "modifying", "worker", rev, self.orc.db_path)
+        rev, _ = transition_stage(
+            req_id, "self_review_done", "worker", rev, self.orc.db_path,
+            self_review_json=json.dumps({"done": True}))
+        rev, _ = transition_stage(
+            req_id, "completion_submitted", "worker", rev, self.orc.db_path)
+        rev, _ = transition_stage(
+            req_id, "completed", "orchestrator", rev, self.orc.db_path)
+
+        # Age it
+        conn = self.orc._connect()
+        conn.execute(
+            "UPDATE pipeline_state SET updated_at=datetime('now','localtime','-300 seconds') "
+            "WHERE request_id=?", (req_id,)
+        )
+        conn.commit()
+        conn.close()
+
+        orphans = check_orphans(self.orc.db_path, timeout_seconds=120)
+        self.assertEqual(len(orphans), 1)
+        self.assertEqual(orphans[0]["request_id"], req_id)
+
+    # ── 14. Status dashboard (read-only) ─────────────────────
 
     def test_status_reads_pipeline_data(self):
         from status import _open_ro, _fetch_all, _max_audit_id

@@ -272,15 +272,13 @@ for row in db.execute('SELECT * FROM audit_log WHERE request_id=? ORDER BY creat
 
 ## 任务板
 
-当用户说 **"看看任务板"** / **"看看状态"** / **"任务面板"** 时，执行：
+当用户说 **"看看任务板"** / **"看看状态"** / **"任务面板"** 时，直接执行：
 
 ```bash
 python status.py --once
 ```
 
-读取输出并简要总结当前状况（几条 pipeline、各自在什么 stage、有无阻塞项）。不展开分析，仅汇报概览。需要深入时用户会指定 request_id。
-
-若用户说 **"打开任务板"**，提示在另一终端运行 `python status.py` 即可启动持续监控面板。
+脚本输出即任务板内容，不用再总结。若用户说 **"打开任务板"**，提示在另一终端运行 `python status.py`。
 
 ## 异常处理
 

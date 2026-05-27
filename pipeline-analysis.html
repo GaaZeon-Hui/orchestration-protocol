@@ -1,0 +1,1421 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pipeline State 全链路分析 — Orchestration Protocol</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --border: #30363d;
+    --text: #c9d1d9;
+    --muted: #8b949e;
+    --accent: #58a6ff;
+    --green: #3fb950;
+    --red: #f85149;
+    --yellow: #d2991d;
+    --purple: #a371f7;
+    --orange: #db6d28;
+    --worker: #58a6ff;
+    --orch: #a371f7;
+    --sql: #3fb950;
+    --json: #d2991d;
+    --both: #db6d28;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    background: var(--bg); color: var(--text); line-height:1.6;
+    padding: 2rem; max-width: 1400px; margin: 0 auto;
+  }
+  h1 { font-size:2rem; margin-bottom:0.25rem; color:#fff; }
+  h1 span { color: var(--muted); font-size:1rem; font-weight:400; margin-left:0.5rem; }
+  h2 { font-size:1.35rem; margin:2.5rem 0 1rem; padding-bottom:0.5rem; border-bottom:1px solid var(--border); color:#fff; }
+  h3 { font-size:1.1rem; margin:1.5rem 0 0.75rem; color:#e6edf3; }
+  .subtitle { color:var(--muted); margin-bottom:2rem; }
+
+  /* State flow diagram */
+  .flow-container {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+    padding: 2rem; overflow-x: auto; margin:1.5rem 0;
+  }
+  .flow-row { display:flex; align-items:center; justify-content:center; flex-wrap:wrap; gap:0; margin:0.35rem 0; }
+  .flow-node {
+    padding: 0.5rem 1rem; border-radius: 8px; font-size:0.82rem; font-weight:600;
+    text-align:center; white-space:nowrap; position:relative;
+  }
+  .node-req  { background:#1a3a5c; border:1px solid #264f78; color:#58a6ff; }
+  .node-orch { background:#2a1a4a; border:1px solid #4a2a7a; color:#a371f7; }
+  .node-work { background:#0d3060; border:1px solid #1a5090; color:#79c0ff; }
+  .node-term { background:#3d1a1a; border:1px solid #6a2a2a; color:#f85149; }
+  .node-end  { background:#1a3d1a; border:1px solid #2a6a2a; color:#3fb950; }
+  .flow-arrow {
+    color:var(--muted); font-size:1.2rem; margin:0 0.25rem; user-select:none;
+  }
+  .flow-arrow-down { display:block; text-align:center; color:var(--muted); font-size:1.4rem; margin:0.15rem 0; }
+  .role-tag {
+    font-size:0.65rem; padding:0.1rem 0.4rem; border-radius:10px; margin-left:0.3rem;
+    font-weight:400; vertical-align:middle;
+  }
+  .tag-orch { background:#4a2a7a; color:#a371f7; }
+  .tag-work { background:#1a5090; color:#79c0ff; }
+
+  /* Cards */
+  .card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+    padding: 1.25rem 1.5rem; margin:1rem 0;
+  }
+  .card h3 { margin-top:0; }
+
+  /* Tables */
+  table { width:100%; border-collapse:collapse; margin:1rem 0; font-size:0.88rem; }
+  th { background:#1c2433; text-align:left; padding:0.6rem 0.75rem; font-weight:600; color:#e6edf3; border-bottom:2px solid var(--border); }
+  td { padding:0.5rem 0.75rem; border-bottom:1px solid var(--border); vertical-align:top; }
+  tr:hover td { background:rgba(255,255,255,0.02); }
+
+  /* Tags */
+  .badge { display:inline-block; padding:0.15rem 0.5rem; border-radius:10px; font-size:0.72rem; font-weight:600; }
+  .badge-sql  { background:#1a3d1a; color:#3fb950; }
+  .badge-json { background:#3d2e1a; color:#d2991d; }
+  .badge-both { background:#3d251a; color:#db6d28; }
+  .badge-llm  { background:#1a2a3d; color:#58a6ff; }
+  .badge-prog { background:#2a1a3d; color:#a371f7; }
+
+  /* Legend */
+  .legend { display:flex; gap:2rem; flex-wrap:wrap; margin:1rem 0; }
+  .legend-item { display:flex; align-items:center; gap:0.5rem; font-size:0.85rem; }
+
+  /* Mechanism box */
+  .mech-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(400px, 1fr)); gap:1rem; margin:1rem 0; }
+  .mech-card {
+    background: var(--surface); border: 1px solid var(--border); border-radius:10px; padding:1.25rem;
+    border-left: 3px solid var(--accent);
+  }
+  .mech-card.constraint { border-left-color: var(--orange); }
+  .mech-card.approval   { border-left-color: var(--purple); }
+  .mech-card.selfrev    { border-left-color: var(--yellow); }
+  .mech-card.lockrel    { border-left-color: var(--green); }
+  .mech-card h4 { margin:0 0 0.75rem; color:#fff; }
+
+  /* Code inline */
+  code { font-family:'JetBrains Mono','Fira Code','Cascadia Code',monospace; font-size:0.82rem; background:#1c2433; padding:0.1rem 0.35rem; border-radius:4px; }
+  pre { background:#0d1117; border:1px solid var(--border); border-radius:8px; padding:1rem; overflow-x:auto; font-size:0.8rem; line-height:1.5; margin:0.75rem 0; }
+
+  /* SVG diagram */
+  .diagram-svg { width:100%; max-width:1100px; display:block; margin:1.5rem auto; }
+
+  .highlight { color:var(--yellow); font-weight:600; }
+  .dim { color:var(--muted); font-size:0.82rem; }
+
+  /* Comparison table highlight */
+  .hl-sql  { background:rgba(63,185,80,0.1); }
+  .hl-json { background:rgba(210,153,29,0.1); }
+  .hl-both { background:rgba(219,109,40,0.1); }
+
+  @media (max-width:768px) {
+    body { padding:1rem; }
+    .flow-row { flex-direction:column; }
+    .flow-arrow { transform:rotate(90deg); }
+  }
+</style>
+</head>
+<body>
+
+<h1>Pipeline State 全链路分析<span>orchestration-protocol @ 030949d</span></h1>
+<p class="subtitle">
+  完整梳理 10 个 stage 的状态转移、Agent 间信息传递机制、三种写入模式分类、以及约束/审批/自审/释锁四大机制的运作原理。
+  所有引用可追溯到 GitHub 源码行号。
+</p>
+
+<!-- ============================================================ -->
+<!-- SECTION: 状态流转图 -->
+<!-- ============================================================ -->
+<h2>一、完整状态流转图</h2>
+
+<div class="flow-container">
+
+<!-- Row 1: Worker init -->
+<div class="flow-row">
+  <div class="flow-node node-req">request_submitted<span class="role-tag tag-work">Worker</span></div>
+  <span class="flow-arrow">──▶</span>
+  <div class="flow-node node-orch">conflict_analysis_done<span class="role-tag tag-orch">Orch</span></div>
+  <span class="flow-arrow">──▶</span>
+  <div class="flow-node node-orch">boundary_analysis_done<span class="role-tag tag-orch">Orch</span></div>
+  <span class="flow-arrow">──▶</span>
+  <div class="flow-node node-orch">logic_analysis_done<span class="role-tag tag-orch">Orch</span></div>
+</div>
+<span class="flow-arrow-down">▼</span>
+<!-- Row 2: decision -->
+<div class="flow-row">
+  <div class="flow-node node-work">approved<span class="role-tag tag-orch">Orch签发</span></div>
+  <span class="flow-arrow" style="margin:0 1.5rem;">← ═══</span>
+  <span style="color:var(--muted);font-size:0.82rem;">三选一</span>
+  <span class="flow-arrow" style="margin:0 1.5rem;">═══ →</span>
+  <div class="flow-node node-orch" style="opacity:0.5;">直接reject<br><span style="font-size:0.7rem;">(Lint不过)</span></div>
+  <span class="flow-arrow">→</span>
+  <div class="flow-node node-term">rejected<span class="role-tag tag-orch">Orch</span></div>
+</div>
+<span class="flow-arrow-down">▼</span>
+<!-- Row 3: Worker execution -->
+<div class="flow-row">
+  <div class="flow-node node-work">modifying<span class="role-tag tag-work">Worker</span></div>
+  <span class="flow-arrow">──▶</span>
+  <div class="flow-node node-work">self_review_done<span class="role-tag tag-work">Worker</span></div>
+  <span class="flow-arrow">──▶</span>
+  <div class="flow-node node-work">completion_submitted<span class="role-tag tag-work">Worker</span></div>
+</div>
+<span class="flow-arrow-down">▼</span>
+<!-- Row 4: verification + release -->
+<div class="flow-row">
+  <div class="flow-node node-orch">completed<span class="role-tag tag-orch">Orch验证</span></div>
+  <span class="flow-arrow">──▶</span>
+  <div class="flow-node node-end">lock_released<span class="role-tag tag-work">Worker</span></div>
+</div>
+</div>
+
+<div class="legend">
+  <div class="legend-item"><div class="flow-node node-req" style="font-size:0.7rem;padding:0.2rem 0.6rem;">request</div> Worker 写入</div>
+  <div class="legend-item"><div class="flow-node node-orch" style="font-size:0.7rem;padding:0.2rem 0.6rem;">analysis</div> Orchestrator 写入</div>
+  <div class="legend-item"><div class="flow-node node-work" style="font-size:0.7rem;padding:0.2rem 0.6rem;">execution</div> Worker 写入</div>
+  <div class="legend-item"><div class="flow-node node-term" style="font-size:0.7rem;padding:0.2rem 0.6rem;">rejected</div> 终态</div>
+  <div class="legend-item"><div class="flow-node node-end" style="font-size:0.7rem;padding:0.2rem 0.6rem;">lock_released</div> 终态</div>
+</div>
+
+<!-- ============================================================ -->
+<!-- SECTION: 全表逐阶段 -->
+<!-- ============================================================ -->
+<h2>二、逐 Stage 写入清单</h2>
+
+<table>
+<thead>
+<tr>
+  <th style="width:40px;">#</th>
+  <th style="width:180px;">Stage</th>
+  <th style="width:80px;">推进者</th>
+  <th style="width:80px;">传递模式</th>
+  <th>写入的字段</th>
+  <th>字段来源</th>
+  <th style="width:220px;">代码位置</th>
+</tr>
+</thead>
+<tbody>
+
+<tr class="hl-both">
+  <td>0</td>
+  <td><code>request_submitted</code></td>
+  <td><span class="badge badge-json">Worker</span></td>
+  <td><span class="badge badge-both">SQL+JSON</span></td>
+  <td>
+    <code>reason</code>
+    <code>scope_json</code>
+    <code>plan_json</code>
+    <code>self_review_json</code>
+    <code>constraints_json</code>
+  </td>
+  <td>
+    <span class="badge badge-llm">LLM</span><br>
+    <span class="badge badge-llm">LLM</span><br>
+    <span class="badge badge-llm">LLM</span><br>
+    <span class="badge badge-llm">LLM</span><br>
+    <span class="badge badge-llm">LLM</span>
+  </td>
+  <td class="dim">orchestrator.py:287-328<br>(init_pipeline, 裸 INSERT)</td>
+</tr>
+
+<tr class="hl-json">
+  <td>1</td>
+  <td><code>conflict_analysis_done</code></td>
+  <td><span class="badge badge-json">Orch</span></td>
+  <td><span class="badge badge-json">SQL+JSON</span></td>
+  <td><code>conflict_analysis_json</code></td>
+  <td><span class="badge badge-llm">LLM</span></td>
+  <td class="dim">pipeline.py:54-170<br>orch-role/SKILL.md:158-171</td>
+</tr>
+
+<tr class="hl-json">
+  <td>2</td>
+  <td><code>boundary_analysis_done</code></td>
+  <td><span class="badge badge-json">Orch</span></td>
+  <td><span class="badge badge-json">SQL+JSON</span></td>
+  <td><code>boundary_analysis_json</code></td>
+  <td><span class="badge badge-llm">LLM</span></td>
+  <td class="dim">pipeline.py:54-170<br>orch-role/SKILL.md:173-182</td>
+</tr>
+
+<tr class="hl-json">
+  <td>3</td>
+  <td><code>logic_analysis_done</code></td>
+  <td><span class="badge badge-json">Orch</span></td>
+  <td><span class="badge badge-json">SQL+JSON</span></td>
+  <td><code>logic_analysis_json</code></td>
+  <td><span class="badge badge-llm">LLM</span></td>
+  <td class="dim">pipeline.py:54-170<br>orch-role/SKILL.md:184-195</td>
+</tr>
+
+<tr class="hl-both">
+  <td>4a</td>
+  <td><code>approved</code></td>
+  <td><span class="badge badge-json">Orch</span></td>
+  <td><span class="badge badge-both">SQL+JSON</span></td>
+  <td>
+    <code>approval_status</code>
+    <code>granted_scope_json</code>
+    <code>reviewed_by</code>
+  </td>
+  <td>
+    <span class="badge badge-prog">程序</span>
+    <span class="badge badge-llm">LLM</span>
+    <span class="badge badge-prog">程序</span>
+  </td>
+  <td class="dim">orch-role/SKILL.md:206-212</td>
+</tr>
+
+<tr class="hl-json">
+  <td>4b</td>
+  <td><code>rejected</code> ⬛终态</td>
+  <td><span class="badge badge-json">Orch</span></td>
+  <td><span class="badge badge-json">SQL+JSON</span></td>
+  <td>
+    <code>approval_status</code>
+    <code>rejection_reason</code>
+  </td>
+  <td>
+    <span class="badge badge-prog">程序</span>
+    <span class="badge badge-llm">LLM / Lint</span>
+  </td>
+  <td class="dim">orch-role/SKILL.md:215-221</td>
+</tr>
+
+<tr class="hl-sql">
+  <td>5</td>
+  <td><code>modifying</code></td>
+  <td><span class="badge badge-sql">Worker</span></td>
+  <td><span class="badge badge-sql">纯SQL</span></td>
+  <td><em>无数据字段，仅 stage + revision</em></td>
+  <td>—</td>
+  <td class="dim">worker-role/SKILL.md:151-154</td>
+</tr>
+
+<tr class="hl-json">
+  <td>6</td>
+  <td><code>self_review_done</code></td>
+  <td><span class="badge badge-json">Worker</span></td>
+  <td><span class="badge badge-json">SQL+JSON</span></td>
+  <td><code>self_review_json</code> ⚠必填</td>
+  <td><span class="badge badge-llm">LLM</span></td>
+  <td class="dim">worker-role/SKILL.md:163-176<br>pipeline.py:115-122 (强制校验)</td>
+</tr>
+
+<tr class="hl-json">
+  <td>7</td>
+  <td><code>completion_submitted</code></td>
+  <td><span class="badge badge-json">Worker</span></td>
+  <td><span class="badge badge-json">SQL+JSON</span></td>
+  <td>
+    <code>commits_json</code>
+    <code>sync_notes</code>
+    <code>context_updates_json</code>
+  </td>
+  <td>
+    <span class="badge badge-prog">程序(git)</span>
+    <span class="badge badge-llm">LLM</span>
+    <span class="badge badge-llm">LLM</span>
+  </td>
+  <td class="dim">worker-role/SKILL.md:183-189</td>
+</tr>
+
+<tr class="hl-sql">
+  <td>8</td>
+  <td><code>completed</code></td>
+  <td><span class="badge badge-sql">Orch</span></td>
+  <td><span class="badge badge-sql">纯SQL</span></td>
+  <td><em>无数据字段，仅 stage + revision</em></td>
+  <td>—</td>
+  <td class="dim">orch-role/SKILL.md:247-250</td>
+</tr>
+
+<tr class="hl-sql">
+  <td>9</td>
+  <td><code>lock_released</code> ⬛终态</td>
+  <td><span class="badge badge-sql">Worker</span></td>
+  <td><span class="badge badge-sql">纯SQL</span></td>
+  <td><em>无数据字段，仅 stage + revision</em></td>
+  <td>—</td>
+  <td class="dim">worker-role/SKILL.md:202-206</td>
+</tr>
+
+</tbody>
+</table>
+
+<div class="legend">
+  <div class="legend-item"><span class="badge badge-sql">纯SQL</span> 只推进 stage+revision，零 JSON</div>
+  <div class="legend-item"><span class="badge badge-json">SQL+JSON</span> 推进 stage 同时携带 JSON 字段</div>
+  <div class="legend-item"><span class="badge badge-both">SQL+JSON</span> 带多个 JSON 字段（init/签发阶段）</div>
+  <div class="legend-item"><span class="badge badge-llm">LLM</span> LLM 生成</div>
+  <div class="legend-item"><span class="badge badge-prog">程序</span> 程序生成</div>
+</div>
+
+<!-- ============================================================ -->
+<!-- SECTION: 三种写入模式 -->
+<!-- ============================================================ -->
+<h2>三、三种写入模式分类</h2>
+
+<div class="card">
+<h3>模式 A：纯 SQL 状态传递（3 处）</h3>
+<p>只推进 <code>stage</code> 和 <code>revision</code>（CAS +1），<strong>不写入任何 JSON 数据列</strong>。审计日志记录 stage 变更但不含 payload。</p>
+
+<table>
+<tr><th>Transition</th><th>角色</th><th>为什么不需要 JSON？</th></tr>
+<tr>
+  <td><code>approved → modifying</code></td>
+  <td>Worker</td>
+  <td><code>granted_scope_json</code> 已在上一步写入，Worker 读它即可知道能改什么</td>
+</tr>
+<tr>
+  <td><code>completion_submitted → completed</code></td>
+  <td>Orchestrator</td>
+  <td><code>self_review_json</code> + <code>commits_json</code> 已在上一步写入，Orch 对照 git diff 验证后只推进 stage</td>
+</tr>
+<tr>
+  <td><code>completed → lock_released</code></td>
+  <td>Worker</td>
+  <td>所有信息已齐全，只需释放锁标记流程结束</td>
+</tr>
+</table>
+
+<p class="dim" style="margin-top:0.5rem;">🔑 关键洞察：三个纯 SQL 推进恰好是 <strong>权限交接点</strong>——Orch→Worker、Worker→Orch、Worker→终态。不需要新信息，只需要"我确认上一步完成了"。</p>
+</div>
+
+<div class="card">
+<h3>模式 B：SQL 状态推进 + JSON 传信息（6 处）</h3>
+<p>推进 stage 的同时，把自己的分析结论/产出 <strong>序列化为 JSON 写入指定列</strong>，供另一方后续读取。</p>
+<p style="color:var(--muted);margin-top:0.5rem;">
+  一方写入，另一方读取。写和推进耦合在同一事务中（<code>pipeline.py:142-168</code>），读是解耦的（随时通过 <code>orc.get_pipeline()</code> 查询）。
+</p>
+</div>
+
+<div class="card">
+<h3>模式 C：双边 JSON 接力（3 条链路）</h3>
+<p>同一语义域被两个角色用不同的列、不同的 JSON 结构接力传递：</p>
+
+<table>
+<tr><th>链路</th><th>Worker 写入</th><th>Orchestrator 写入</th><th>结构差异</th></tr>
+<tr>
+  <td><strong>Scope 链</strong></td>
+  <td><code>scope_json</code> = <code>{"modules":[], "files":[], "excluded":[]}</code></td>
+  <td><code>granted_scope_json</code> = <code>{"files":[], "forbidden":[]}</code></td>
+  <td>Worker 用 modules/files/excluded 三字段申请；Orch 用 files/forbidden 两字段签发。结构不对称。</td>
+</tr>
+<tr>
+  <td><strong>Self-Review 链</strong></td>
+  <td><code>self_review_json</code> (init) = <code>{"potential_issues":[]}</code></td>
+  <td>—</td>
+  <td>Worker 写两次：init 时写预判，final 时覆盖写完整自审。init 版本永久丢失。</td>
+</tr>
+<tr>
+  <td><strong>Completion 链</strong></td>
+  <td><code>commits_json</code> + <code>context_updates_json</code></td>
+  <td>—（Orch 只读不写）</td>
+  <td>Worker 提供 commit 清单和上下文变更，Orch 对照 git diff 逐条验证。</td>
+</tr>
+</table>
+</div>
+
+<!-- ============================================================ -->
+<!-- SECTION: Agent 间信息传递图 -->
+<!-- ============================================================ -->
+<h2>四、Agent 间信息传递全景</h2>
+
+<div class="flow-container">
+<svg class="diagram-svg" viewBox="0 0 1050 580" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <marker id="arrowBlue" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#58a6ff"/>
+    </marker>
+    <marker id="arrowPurple" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#a371f7"/>
+    </marker>
+    <marker id="arrowGreen" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#3fb950"/>
+    </marker>
+    <filter id="glow"><feGaussianBlur stdDeviation="2" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+  </defs>
+
+  <!-- Worker Box -->
+  <rect x="30" y="30" width="440" height="520" rx="12" fill="#0d1a2d" stroke="#1a5090" stroke-width="2"/>
+  <text x="250" y="60" text-anchor="middle" fill="#79c0ff" font-size="16" font-weight="bold">Worker Agent</text>
+  <line x1="60" y1="75" x2="440" y2="75" stroke="#1a5090" stroke-width="1"/>
+
+  <!-- Worker actions -->
+  <rect x="60" y="95" width="380" height="58" rx="6" fill="#0d3060" stroke="#264f78" stroke-width="1"/>
+  <text x="75" y="118" fill="#fff" font-size="13" font-weight="bold">Step 0: init_pipeline()</text>
+  <text x="75" y="138" fill="#8b949e" font-size="11">写入 5 个 LLM 生成字段到 pipeline_state</text>
+
+  <rect x="60" y="280" width="380" height="58" rx="6" fill="#0d3060" stroke="#264f78" stroke-width="1"/>
+  <text x="75" y="303" fill="#fff" font-size="13" font-weight="bold">Step 5-6: 修改代码 + 自审</text>
+  <text x="75" y="323" fill="#8b949e" font-size="11">读取 granted_scope_json → 修改授权文件 → 写入 self_review_json</text>
+
+  <rect x="60" y="370" width="380" height="58" rx="6" fill="#0d3060" stroke="#264f78" stroke-width="1"/>
+  <text x="75" y="393" fill="#fff" font-size="13" font-weight="bold">Step 7: completion_submitted</text>
+  <text x="75" y="413" fill="#8b949e" font-size="11">写入 commits_json + sync_notes + context_updates_json</text>
+
+  <rect x="60" y="460" width="380" height="58" rx="6" fill="#0d3060" stroke="#264f78" stroke-width="1"/>
+  <text x="75" y="483" fill="#fff" font-size="13" font-weight="bold">Step 9: lock_released (纯 SQL)</text>
+  <text x="75" y="503" fill="#8b949e" font-size="11">Orch 验证通过后，Worker 释锁，流程结束</text>
+
+  <!-- Orchestrator Box -->
+  <rect x="580" y="30" width="440" height="520" rx="12" fill="#1a0d2d" stroke="#4a2a7a" stroke-width="2"/>
+  <text x="800" y="60" text-anchor="middle" fill="#a371f7" font-size="16" font-weight="bold">Orchestrator Agent</text>
+  <line x1="610" y1="75" x2="990" y2="75" stroke="#4a2a7a" stroke-width="1"/>
+
+  <rect x="610" y="95" width="380" height="45" rx="6" fill="#2a1a4a" stroke="#5a3a8a" stroke-width="1"/>
+  <text x="625" y="115" fill="#fff" font-size="13" font-weight="bold">Step 1: Lint 预检 (程序化)</text>
+  <text x="625" y="132" fill="#8b949e" font-size="11">越界检查 → 不过则直接 reject，不消耗 LLM</text>
+
+  <rect x="610" y="155" width="380" height="100" rx="6" fill="#2a1a4a" stroke="#5a3a8a" stroke-width="1"/>
+  <text x="625" y="175" fill="#fff" font-size="13" font-weight="bold">Step 2-4: 三项 LLM 分析</text>
+  <text x="625" y="195" fill="#8b949e" font-size="11">① 冲突分析 → conflict_analysis_json</text>
+  <text x="625" y="212" fill="#8b949e" font-size="11">② 边界分析 → boundary_analysis_json</text>
+  <text x="625" y="229" fill="#8b949e" font-size="11">③ 逻辑分析 → logic_analysis_json</text>
+  <text x="625" y="246" fill="#8b949e" font-size="11">（LLM 产物，崩溃恢复时自读跳过已完成阶段）</text>
+
+  <rect x="610" y="270" width="380" height="58" rx="6" fill="#2a1a4a" stroke="#5a3a8a" stroke-width="1"/>
+  <text x="625" y="293" fill="#fff" font-size="13" font-weight="bold">Step 5: 签发审批</text>
+  <text x="625" y="313" fill="#8b949e" font-size="11">写入 approved/rejected + granted_scope_json + rejection_reason</text>
+
+  <rect x="610" y="370" width="380" height="58" rx="6" fill="#2a1a4a" stroke="#5a3a8a" stroke-width="1"/>
+  <text x="625" y="393" fill="#fff" font-size="13" font-weight="bold">Step 8: 验证 Completion</text>
+  <text x="625" y="413" fill="#8b949e" font-size="11">对照 git diff 逐条验证 self_review_json → 推进到 completed</text>
+
+  <!-- Central DB -->
+  <rect x="470" y="190" width="100" height="180" rx="8" fill="#0d1117" stroke="#30363d" stroke-width="2"/>
+  <text x="520" y="230" text-anchor="middle" fill="#c9d1d9" font-size="13" font-weight="bold">SQLite</text>
+  <text x="520" y="250" text-anchor="middle" fill="#8b949e" font-size="10">pipeline_state</text>
+  <text x="520" y="268" text-anchor="middle" fill="#8b949e" font-size="10">context</text>
+  <text x="520" y="286" text-anchor="middle" fill="#8b949e" font-size="10">audit_log</text>
+  <text x="520" y="310" text-anchor="middle" fill="#d2991d" font-size="9">WAL mode</text>
+  <text x="520" y="328" text-anchor="middle" fill="#d2991d" font-size="9">CAS revision</text>
+  <text x="520" y="346" text-anchor="middle" fill="#d2991d" font-size="9">SQL trigger</text>
+
+  <!-- Arrows Worker → DB -->
+  <line x1="440" y1="155" x2="470" y2="230" stroke="#58a6ff" stroke-width="1.5" marker-end="url(#arrowBlue)" stroke-dasharray="6,3"/>
+  <line x1="440" y1="340" x2="470" y2="260" stroke="#58a6ff" stroke-width="1.5" marker-end="url(#arrowBlue)" stroke-dasharray="6,3"/>
+  <line x1="440" y1="430" x2="470" y2="290" stroke="#58a6ff" stroke-width="1.5" marker-end="url(#arrowBlue)" stroke-dasharray="6,3"/>
+  <line x1="440" y1="490" x2="470" y2="310" stroke="#58a6ff" stroke-width="1.5" marker-end="url(#arrowBlue)" stroke-dasharray="6,3"/>
+
+  <!-- Arrows DB → Worker (read) -->
+  <line x1="470" y1="230" x2="440" y2="300" stroke="#3fb950" stroke-width="1" marker-end="url(#arrowGreen)" stroke-dasharray="4,4"/>
+
+  <!-- Arrows Orch → DB -->
+  <line x1="580" y1="120" x2="530" y2="220" stroke="#a371f7" stroke-width="1.5" marker-end="url(#arrowPurple)" stroke-dasharray="6,3"/>
+  <line x1="580" y1="205" x2="530" y2="240" stroke="#a371f7" stroke-width="1.5" marker-end="url(#arrowPurple)" stroke-dasharray="6,3"/>
+  <line x1="580" y1="300" x2="530" y2="270" stroke="#a371f7" stroke-width="1.5" marker-end="url(#arrowPurple)" stroke-dasharray="6,3"/>
+  <line x1="580" y1="400" x2="530" y2="300" stroke="#a371f7" stroke-width="1.5" marker-end="url(#arrowPurple)" stroke-dasharray="6,3"/>
+
+  <!-- Key transfers labels -->
+  <text x="505" y="170" text-anchor="middle" fill="#d2991d" font-size="10" font-weight="bold">reason, scope, plan,</text>
+  <text x="505" y="184" text-anchor="middle" fill="#d2991d" font-size="10" font-weight="bold">self_review, constraints</text>
+
+  <text x="510" y="360" text-anchor="middle" fill="#d2991d" font-size="10" font-weight="bold">granted_scope_json</text>
+
+  <text x="486" y="140" text-anchor="middle" fill="#d2991d" font-size="10" font-weight="bold">3× analysis_json</text>
+
+</svg>
+</div>
+
+<!-- ============================================================ -->
+<!-- SECTION: LLM 传递矩阵 -->
+<!-- ============================================================ -->
+<h2>五、LLM → LLM 信息传递矩阵</h2>
+
+<p>以下 13 个字段由 LLM 生成，被另一个 LLM（或同 LLM 下次调用）读取并用于决策。</p>
+
+<table>
+<thead>
+<tr><th>#</th><th>字段</th><th>生成方</th><th>消费者</th><th>传递用途</th><th>写入 Stage</th><th>消费 Stage</th></tr>
+</thead>
+<tbody>
+<tr>
+  <td>1</td><td><code>reason</code></td>
+  <td><span class="badge badge-llm">Worker LLM</span></td>
+  <td>Orch LLM</td>
+  <td>理解变更动机</td>
+  <td>request_submitted</td>
+  <td>conflict_analysis_done</td>
+</tr>
+<tr>
+  <td>2</td><td><code>scope_json</code></td>
+  <td><span class="badge badge-llm">Worker LLM</span></td>
+  <td>Orch LLM</td>
+  <td>判断越界风险，决定授权范围</td>
+  <td>request_submitted</td>
+  <td>boundary_analysis_done</td>
+</tr>
+<tr>
+  <td>3</td><td><code>plan_json</code></td>
+  <td><span class="badge badge-llm">Worker LLM</span></td>
+  <td>Orch LLM</td>
+  <td>评估方案影响面</td>
+  <td>request_submitted</td>
+  <td>logic_analysis_done</td>
+</tr>
+<tr>
+  <td>4</td><td><code>self_review_json</code> (init)</td>
+  <td><span class="badge badge-llm">Worker LLM</span></td>
+  <td>Orch LLM</td>
+  <td>预判问题参考</td>
+  <td>request_submitted</td>
+  <td>completed(验证)</td>
+</tr>
+<tr>
+  <td>5</td><td><code>constraints_json</code></td>
+  <td><span class="badge badge-llm">Worker LLM</span></td>
+  <td>Orch + Worker LLM</td>
+  <td>约束条件基线</td>
+  <td>request_submitted</td>
+  <td>三项分析 + 自审</td>
+</tr>
+<tr>
+  <td>6</td><td><code>conflict_analysis_json</code></td>
+  <td><span class="badge badge-llm">Orch LLM</span></td>
+  <td>Orch LLM (崩溃恢复)</td>
+  <td>断点续跑，跳过已完成分析</td>
+  <td>conflict_analysis_done</td>
+  <td>Orch 重启恢复</td>
+</tr>
+<tr>
+  <td>7</td><td><code>boundary_analysis_json</code></td>
+  <td><span class="badge badge-llm">Orch LLM</span></td>
+  <td>Orch LLM (崩溃恢复)</td>
+  <td>断点续跑</td>
+  <td>boundary_analysis_done</td>
+  <td>Orch 重启恢复</td>
+</tr>
+<tr>
+  <td>8</td><td><code>logic_analysis_json</code></td>
+  <td><span class="badge badge-llm">Orch LLM</span></td>
+  <td>Orch LLM (崩溃恢复)</td>
+  <td>断点续跑</td>
+  <td>logic_analysis_done</td>
+  <td>Orch 重启恢复</td>
+</tr>
+<tr style="background:rgba(163,113,247,0.08);">
+  <td><strong>9</strong></td><td><code><strong>granted_scope_json</strong></code></td>
+  <td><span class="badge badge-llm">Orch LLM</span></td>
+  <td><strong>Worker LLM</strong></td>
+  <td><strong>执行边界——唯一从 Orch 回传给 Worker 的 LLM 决策</strong></td>
+  <td>approved</td>
+  <td>modifying</td>
+</tr>
+<tr>
+  <td>10</td><td><code>rejection_reason</code></td>
+  <td><span class="badge badge-llm">Orch LLM / Lint</span></td>
+  <td>Worker LLM → 用户</td>
+  <td>汇报拒绝原因</td>
+  <td>rejected</td>
+  <td>Worker 读取汇报</td>
+</tr>
+<tr>
+  <td>11</td><td><code>self_review_json</code> (final)</td>
+  <td><span class="badge badge-llm">Worker LLM</span></td>
+  <td>Orch LLM</td>
+  <td>对照 git diff 逐条验证真实性</td>
+  <td>self_review_done</td>
+  <td>completed(验证)</td>
+</tr>
+<tr>
+  <td>12</td><td><code>sync_notes</code></td>
+  <td><span class="badge badge-llm">Worker LLM</span></td>
+  <td>Orch LLM</td>
+  <td>辅助验证 completion</td>
+  <td>completion_submitted</td>
+  <td>completed(验证)</td>
+</tr>
+<tr>
+  <td>13</td><td><code>context_updates_json</code></td>
+  <td><span class="badge badge-llm">Worker LLM</span></td>
+  <td>Orch LLM</td>
+  <td>上下文变更</td>
+  <td>completion_submitted</td>
+  <td>后续循环</td>
+</tr>
+</tbody>
+</table>
+
+<div class="card" style="border-left:3px solid var(--yellow);">
+<h3 style="color:var(--yellow);">⚠ 不对称发现</h3>
+<p>
+  Worker → Orch 方向：<strong>10 个 LLM 生成字段</strong>（#1-5 初始化 + #6-8 分析 + #11-13 completion）<br>
+  Orch → Worker 方向：<strong>仅 1 个</strong>（#9 <code>granted_scope_json</code>）<br><br>
+  Orch 的三项分析（#6-#8）是 <strong>Orch LLM 写给 Orch LLM 自己读的</strong>——仅用于崩溃恢复。<br>
+  如果 Orch 运行稳定不崩溃，这 3 次 LLM 调用的持久化是纯开销。
+</p>
+</div>
+
+
+<!-- ============================================================ -->
+<!-- SECTION: 四大机制深度解析 -->
+<!-- ============================================================ -->
+<h2>六、四大核心机制深度解析</h2>
+
+<div class="mech-grid">
+
+  <!-- 约束机制 -->
+  <div class="mech-card constraint">
+    <h4>🔒 约束机制 (Constraints)</h4>
+    <p style="margin-bottom:0.75rem;"><strong>三层约束叠加：</strong></p>
+
+    <p style="margin:0.5rem 0;color:var(--muted);"><strong>第 1 层 — 模块边界 (Boundaries)</strong></p>
+    <p style="font-size:0.85rem;">存储在 <code>context.boundaries_json</code>，由用户首次配置，所有 Agent 共享。<br>
+    格式：<code>{"py-agent":{"can_touch":["*.py"],"forbidden":["*.md","app/"]}}</code></p>
+
+    <p style="margin:0.5rem 0;color:var(--muted);"><strong>第 2 层 — Lint 程序化校验</strong></p>
+    <p style="font-size:0.85rem;">
+      <code>lint.py:_check_boundaries()</code> — 对 git diff 的每个文件做 glob 匹配：<br>
+      • 命中 <code>forbidden</code> → 直接 reject，不消耗 LLM<br>
+      • 不在 <code>can_touch</code> → 直接 reject<br>
+      • Lint 过 → 进入 LLM 分析
+    </p>
+
+    <p style="margin:0.5rem 0;color:var(--muted);"><strong>第 3 层 — LLM 约束声明</strong></p>
+    <p style="font-size:0.85rem;">
+      <code>constraints_json</code> — Worker LLM 在 init 时自报约束（如 "不可修改 public API 签名"），
+      Orch LLM 和 Worker 自审时对照检查。
+    </p>
+
+    <pre>约束生效链路：
+context.boundaries_json ──▶ lint.py 程序校验 ──▶ Orch LLM 边界分析
+                                │                        │
+                          不过→直接reject         边缘case→写入
+                          (零LLM开销)           boundary_analysis_json
+
+constraints_json ──▶ Orch LLM 冲突+逻辑分析 ──▶ Worker 自审对照</pre>
+  </div>
+
+  <!-- 审批机制 -->
+  <div class="mech-card approval">
+    <h4>✅ 审批机制 (Approval)</h4>
+    <p style="margin-bottom:0.75rem;"><strong>Lint 前置 + 三项 LLM 分析 + 签发：</strong></p>
+
+    <p style="font-size:0.85rem;margin:0.25rem 0;">
+      <strong>Step 1:</strong> <code>lint_changed_files()</code> 程序化预检 → 不过则直接 <code>reject</code>
+    </p>
+    <p style="font-size:0.85rem;margin:0.25rem 0;">
+      <strong>Step 2:</strong> Orch LLM 冲突分析 → <code>conflict_analysis_json</code> → 推进 stage
+    </p>
+    <p style="font-size:0.85rem;margin:0.25rem 0;">
+      <strong>Step 3:</strong> Orch LLM 边界分析 → <code>boundary_analysis_json</code> → 推进 stage
+    </p>
+    <p style="font-size:0.85rem;margin:0.25rem 0;">
+      <strong>Step 4:</strong> Orch LLM 逻辑分析 → <code>logic_analysis_json</code> → 推进 stage
+    </p>
+    <p style="font-size:0.85rem;margin:0.25rem 0;">
+      <strong>Step 5:</strong> 签发 <code>approved</code>（写入 <code>granted_scope_json</code>）或 <code>rejected</code>
+    </p>
+
+    <pre>approval_status = "approved"
+granted_scope_json = {"files":["a.py","b.py"],"forbidden":["core/"]}
+reviewed_by = "orchestrator"
+
+→ Worker 读取 granted_scope_json 作为修改边界
+→ Worker 只能修改 files 白名单中的文件
+→ forbidden 为黑名单补充</pre>
+
+    <p style="font-size:0.82rem;color:var(--muted);margin-top:0.5rem;">
+      ⚡ Orch 每步分析前先读 <code>orc.get_pipeline(req_id)</code> 获取最新 revision，推进后用返回值更新 revision——读-改-写循环。
+    </p>
+  </div>
+
+  <!-- 自审机制 -->
+  <div class="mech-card selfrev">
+    <h4>🔍 自审机制 (Self-Review)</h4>
+    <p style="margin-bottom:0.75rem;"><strong>Worker 修改代码后，LLM 对照边界和约束做自我审查：</strong></p>
+
+    <p style="font-size:0.85rem;">
+      <code>pipeline.py:115-122</code> 强制校验：<code>modifying → self_review_done</code> 必须携带 <code>self_review_json</code>，否则抛 <code>ValueError</code>。
+    </p>
+
+    <pre>self_review_json = {
+  "files_modified": ["a.py", "b.py"],
+  "files_not_in_scope": [],       ← 是否有越界修改
+  "new_functions_created": ["foo","bar"],
+  "breaking_changes": [],          ← 是否有破坏性变更
+  "constraints_violated": [],      ← 是否违反约束
+  "potential_issues": []           ← 潜在风险
+}</pre>
+
+    <p style="font-size:0.85rem;color:var(--muted);">
+      Worker LLM 自审时必须对照 <code>orc.get_boundaries()</code>（模块边界）和 <code>granted_scope_json</code>（授权范围）。<br>
+      这个 self_review_json 后续被 Orch 对照 <code>git diff</code> 逐条验证——<strong>不信自审，信 diff</strong>。
+    </p>
+
+    <p style="font-size:0.82rem;color:var(--red);margin-top:0.5rem;">
+      ⚠ 注意：init 时写入的 <code>self_review_json</code>（预判版）被 final 时的版本覆盖，预判内容永久丢失。
+    </p>
+  </div>
+
+  <!-- 释锁机制 -->
+  <div class="mech-card lockrel">
+    <h4>🔓 释锁机制 (Lock Release)</h4>
+    <p style="margin-bottom:0.75rem;"><strong>completed 不是终态——需要 Worker 显式释锁才是真正结束：</strong></p>
+
+    <pre>completed ──Worker──▶ lock_released (终态)
+                          │
+                    transition_stage()
+                    纯 SQL，无 JSON
+                    revision++, stage=lock_released</pre>
+
+    <p style="font-size:0.85rem;">
+      <strong>为什么 completed 故意不作为终态？</strong><br>
+      这是项目 memory 中记录的刻意设计决策。如果 Orchestrator 在 <code>completed</code> 阶段崩溃，
+      Worker 仍持有 active pipeline，可以恢复并从断点继续。completed 只是 "Orch 验证通过"，锁还是 Worker 的。
+    </p>
+
+    <p style="font-size:0.85rem;margin-top:0.5rem;">
+      <strong>lock_released 之后：</strong><br>
+      • <code>TERMINAL_STAGES = {'rejected', 'lock_released'}</code>（pipeline.py:49）<br>
+      • <code>recover_pipeline()</code> 忽略终态 pipeline（orchestrator.py:386-400）<br>
+      • Worker 可以创建新的 pipeline（同 agent 活跃 pipeline 互斥检查只针对非终态）
+    </p>
+  </div>
+
+</div>
+
+<!-- ============================================================ -->
+<!-- SECTION: 七 — SQLite 数据库全貌 -->
+<!-- ============================================================ -->
+<h2>七、SQLite 数据库全貌：三张表的实际记录</h2>
+
+<p>以下以一条具体 pipeline 为例，追踪 <strong>"py-agent 请求修改 a.py 修复空指针"</strong> 从头到尾在 SQLite 中的完整记录变化。</p>
+
+<h3>7.1 连接参数</h3>
+<div class="card">
+<pre>PRAGMA journal_mode=WAL;        -- 写前日志，读写不互斥
+PRAGMA synchronous=NORMAL;      -- 平衡安全与性能（非 FULL）
+PRAGMA foreign_keys=ON;         -- 外键约束（虽然表间暂无 FK 引用）
+PRAGMA busy_timeout=5000;       -- 写锁等待 5 秒后超时</pre>
+</div>
+
+<h3>7.2 初始状态：Worker 调用 init_pipeline()</h3>
+<p class="dim">代码：<code>orchestrator.py:354-395</code>。这是唯一的裸 INSERT，<strong>不走 transition_stage()，不产生 audit_log</strong>。</p>
+
+<div class="card">
+<pre style="font-size:0.78rem;">
+<span style="color:var(--muted);">-- orchestrator.py:381-392 执行的 SQL（伪代码表示）</span>
+INSERT INTO pipeline_state
+  (request_id, agent, stage, reason, scope_json, plan_json, self_review_json, constraints_json)
+VALUES (
+  'py-agent-20260524-120000-a1b2c3',
+  'py-agent',
+  'request_submitted',
+  '修复 a.py 中的空指针异常',
+  '{"modules":[], "files":["a.py"], "excluded":[]}',
+  '{"summary":"添加空值检查", "steps":["定位空指针","添加None检查"], "breaking_changes":false}',
+  '{"potential_issues":["需确认不影响调用方"]}',
+  '["不可修改public API签名"]'
+);</pre>
+</div>
+
+<p style="margin:0.5rem 0;"><strong>执行后 pipeline_state 行状态：</strong></p>
+<table style="font-size:0.8rem;">
+<tr><th>列</th><th>值</th><th>说明</th></tr>
+<tr><td><code>request_id</code></td><td>py-agent-20260524-120000-a1b2c3</td><td>{agent}-{timestamp}-{uuid前6位}</td></tr>
+<tr><td><code>agent</code></td><td>py-agent</td><td>Worker 标识</td></tr>
+<tr><td><code>stage</code></td><td class="highlight">request_submitted</td><td>初始 stage</td></tr>
+<tr><td><code>revision</code></td><td class="highlight">0</td><td>CAS 计数器起点</td></tr>
+<tr><td><code>reason</code></td><td>修复 a.py 中的空指针异常</td><td>LLM 生成</td></tr>
+<tr><td><code>scope_json</code></td><td>{"modules":[],"files":["a.py"],"excluded":[]}</td><td>LLM 生成，TEXT 存储</td></tr>
+<tr><td><code>plan_json</code></td><td>{"summary":"添加空值检查",...}</td><td>LLM 生成</td></tr>
+<tr><td><code>self_review_json</code></td><td>{"potential_issues":["需确认不影响调用方"]}</td><td>LLM 生成，预判版</td></tr>
+<tr><td><code>constraints_json</code></td><td>["不可修改public API签名"]</td><td>LLM 生成</td></tr>
+<tr><td><code>conflict_analysis_json</code></td><td style="color:var(--muted);">NULL</td><td>尚未写入</td></tr>
+<tr><td><code>boundary_analysis_json</code></td><td style="color:var(--muted);">NULL</td><td>尚未写入</td></tr>
+<tr><td><code>logic_analysis_json</code></td><td style="color:var(--muted);">NULL</td><td>尚未写入</td></tr>
+<tr><td><code>approval_status</code></td><td style="color:var(--muted);">NULL</td><td>尚未审批</td></tr>
+<tr><td><code>granted_scope_json</code></td><td style="color:var(--muted);">NULL</td><td>尚未签发</td></tr>
+<tr><td><code>created_at</code></td><td>2026-05-24 12:00:00</td><td>DEFAULT datetime('now','localtime')</td></tr>
+<tr><td><code>updated_at</code></td><td>2026-05-24 12:00:00</td><td>同上</td></tr>
+</table>
+
+<p style="margin-top:0.5rem;color:var(--red);"><strong>注意：</strong>init_pipeline 不写 audit_log——因为它是 INSERT 而非 stage 转移。audit_log 只记录 stage 变更。</p>
+
+<h3>7.3 第一次推进：request_submitted → conflict_analysis_done</h3>
+<p class="dim">代码：<code>pipeline.py:55-170</code>。完整的读-校验-写-审计流程。</p>
+
+<div class="card">
+<p style="margin-bottom:0.5rem;"><strong>Python 调用：</strong></p>
+<pre style="font-size:0.78rem;">rev, stage = transition_stage(
+    'py-agent-20260524-120000-a1b2c3',
+    'conflict_analysis_done',
+    role='orchestrator', revision=0,
+    db_path='.claude/orchestrator/orchestrator.db',
+    conflict_analysis_json='{"conflicts_found":[],"resolution":"无冲突"}'
+)</pre>
+
+<p style="margin:1rem 0 0.5rem;color:var(--yellow);"><strong>函数体内执行步骤（逐行对照）：</strong></p>
+
+<table style="font-size:0.8rem;">
+<tr><th style="width:70px;">源码行</th><th>操作</th><th>SQL / 逻辑</th></tr>
+<tr>
+  <td>78-81</td>
+  <td><strong>SELECT 读取</strong></td>
+  <td><code>SELECT stage, revision FROM pipeline_state WHERE request_id='...'</code><br>→ (<code>'request_submitted'</code>, <code>0</code>)</td>
+</tr>
+<tr>
+  <td>91-95</td>
+  <td><strong>转移路径校验</strong></td>
+  <td><code>'conflict_analysis_done' in VALID_TRANSITIONS['request_submitted']</code> → ✓</td>
+</tr>
+<tr>
+  <td>98-104</td>
+  <td><strong>Revision 比对</strong></td>
+  <td>传入 revision=<code>0</code> == 数据库 revision=<code>0</code> → ✓</td>
+</tr>
+<tr>
+  <td>107-113</td>
+  <td><strong>权限校验</strong></td>
+  <td><code>'request_submitted' in ROLE_PERMISSIONS['orchestrator']</code> → ✓</td>
+</tr>
+<tr>
+  <td>124-125</td>
+  <td><strong>字段白名单过滤</strong></td>
+  <td><code>{"conflict_analysis_json":"{...}"}</code> → 在 ALLOWED_COLUMNS 中 → 保留</td>
+</tr>
+<tr>
+  <td>128-138</td>
+  <td><strong>构建 UPDATE</strong></td>
+  <td>SET 子句：<code>stage=?, revision=revision+1, updated_at=..., conflict_analysis_json=?</code><br>WHERE 子句：<code>request_id=? AND stage=? AND revision=?</code></td>
+</tr>
+<tr>
+  <td style="color:var(--yellow);">143</td>
+  <td style="color:var(--yellow);"><strong>BEGIN 事务</strong></td>
+  <td style="color:var(--yellow);"><code>cur.execute("BEGIN")</code></td>
+</tr>
+<tr>
+  <td style="color:var(--yellow);">144-149</td>
+  <td style="color:var(--yellow);"><strong>UPDATE + CAS</strong></td>
+  <td style="color:var(--yellow);"><code>UPDATE pipeline_state SET stage='conflict_analysis_done', revision=revision+1, ... WHERE request_id=? AND stage='request_submitted' AND revision=0</code></td>
+</tr>
+<tr>
+  <td style="color:var(--red);">151-152</td>
+  <td style="color:var(--red);"><strong>CAS 判决</strong></td>
+  <td style="color:var(--red);"><code>if cur.rowcount == 0: raise RuntimeError("CAS failed")</code></td>
+</tr>
+<tr>
+  <td style="color:var(--yellow);">154-166</td>
+  <td style="color:var(--yellow);"><strong>INSERT audit_log</strong></td>
+  <td style="color:var(--yellow);">记录本次变更的完整快照</td>
+</tr>
+<tr>
+  <td style="color:var(--green);">169</td>
+  <td style="color:var(--green);"><strong>COMMIT</strong></td>
+  <td style="color:var(--green);"><code>conn.commit()</code> — 两个写入原子生效</td>
+</tr>
+</table>
+</div>
+
+<p style="margin:0.5rem 0;"><strong>执行后 pipeline_state 行状态：</strong></p>
+<table style="font-size:0.8rem;">
+<tr><th>变化的列</th><th>旧值</th><th>新值</th></tr>
+<tr><td><code>stage</code></td><td>request_submitted</td><td class="highlight">conflict_analysis_done</td></tr>
+<tr><td><code>revision</code></td><td>0</td><td class="highlight">1</td></tr>
+<tr><td><code>conflict_analysis_json</code></td><td>NULL</td><td class="highlight">{"conflicts_found":[],"resolution":"无冲突"}</td></tr>
+<tr><td><code>updated_at</code></td><td>12:00:00</td><td>12:00:05</td></tr>
+</table>
+
+<p style="margin:0.5rem 0;"><strong>audit_log 新增行：</strong></p>
+<table style="font-size:0.8rem;">
+<tr><th>列</th><th>值</th></tr>
+<tr><td><code>id</code></td><td>1 (AUTOINCREMENT)</td></tr>
+<tr><td><code>request_id</code></td><td>py-agent-20260524-120000-a1b2c3</td></tr>
+<tr><td><code>role</code></td><td>orchestrator</td></tr>
+<tr><td><code>stage_from</code></td><td>request_submitted</td></tr>
+<tr><td><code>stage_to</code></td><td>conflict_analysis_done</td></tr>
+<tr><td><code>revision_before</code></td><td>0</td></tr>
+<tr><td><code>revision_after</code></td><td>1</td></tr>
+<tr><td><code>payload_json</code></td><td>{"conflict_analysis_json":"{\"conflicts_found\":[],\"resolution\":\"无冲突\"}"}</td></tr>
+</table>
+
+<h3>7.4 完整流程 10 步后三表终态</h3>
+<p class="dim">以下展示 approved 路径走完后，pipeline_state + audit_log + context 的最终状态。</p>
+
+<div class="card">
+<p><strong>pipeline_state 终态（revision=9, stage=lock_released）：</strong></p>
+<pre style="font-size:0.75rem;max-height:300px;overflow-y:auto;">
+request_id:            py-agent-20260524-120000-a1b2c3
+agent:                 py-agent
+stage:                 lock_released          ← 终态
+revision:              9                      ← 经历 9 次 CAS +1
+
+<span style="color:var(--muted);">── Worker init 写入 ──</span>
+reason:                修复 a.py 中的空指针异常
+scope_json:            {"modules":[],"files":["a.py"],"excluded":[]}
+plan_json:             {"summary":"添加空值检查","steps":[...],"breaking_changes":false}
+self_review_json:      {"files_modified":["a.py"],"files_not_in_scope":[],           ← init 版被 final 版覆盖
+                        "new_functions_created":["check_not_none"],"breaking_changes":[],
+                        "constraints_violated":[],"potential_issues":[]}
+constraints_json:      ["不可修改public API签名"]
+
+<span style="color:var(--muted);">── Orch 三项分析写入 ──</span>
+conflict_analysis_json:  {"conflicts_found":[],"resolution":"无冲突"}
+boundary_analysis_json:  {"edge_cases":[],"released":["a.py"],"warnings":[]}
+logic_analysis_json:     {"new_functions":["check_not_none"],"signature_changes":[],
+                          "deleted_symbols":[],"breaking_changes":[],"field_mapping_issues":[]}
+
+<span style="color:var(--muted);">── Orch 签发 ──</span>
+approval_status:       approved
+granted_scope_json:    {"files":["a.py"],"forbidden":["core/"]}
+reviewed_by:           orchestrator
+rejection_reason:      NULL
+
+<span style="color:var(--muted);">── Worker completion ──</span>
+commits_json:          ["abc123def456"]
+sync_notes:            已修改 a.py，添加 None 检查
+context_updates_json:  {"last_commit":"abc123def456"}
+completed_at:          NULL (未使用)
+</pre>
+</div>
+
+<div class="card" style="margin-top:1rem;">
+<p><strong>audit_log 全部 9 条记录：</strong></p>
+<table style="font-size:0.75rem;">
+<tr><th>id</th><th>role</th><th>stage_from</th><th>stage_to</th><th>rev_before</th><th>rev_after</th><th>payload</th></tr>
+<tr>
+  <td>1</td><td><span class="badge badge-llm">orchestrator</span></td>
+  <td>request_submitted</td><td>conflict_analysis_done</td><td>0</td><td>1</td>
+  <td style="font-size:0.7rem;">{conflict_analysis_json}</td>
+</tr>
+<tr>
+  <td>2</td><td><span class="badge badge-llm">orchestrator</span></td>
+  <td>conflict_analysis_done</td><td>boundary_analysis_done</td><td>1</td><td>2</td>
+  <td style="font-size:0.7rem;">{boundary_analysis_json}</td>
+</tr>
+<tr>
+  <td>3</td><td><span class="badge badge-llm">orchestrator</span></td>
+  <td>boundary_analysis_done</td><td>logic_analysis_done</td><td>2</td><td>3</td>
+  <td style="font-size:0.7rem;">{logic_analysis_json}</td>
+</tr>
+<tr>
+  <td>4</td><td><span class="badge badge-llm">orchestrator</span></td>
+  <td>logic_analysis_done</td><td>approved</td><td>3</td><td>4</td>
+  <td style="font-size:0.7rem;">{approval_status, granted_scope_json, reviewed_by}</td>
+</tr>
+<tr>
+  <td>5</td><td><span class="badge badge-sql">worker</span></td>
+  <td>approved</td><td>modifying</td><td>4</td><td>5</td>
+  <td style="color:var(--muted);font-size:0.7rem;">NULL (纯SQL推进)</td>
+</tr>
+<tr>
+  <td>6</td><td><span class="badge badge-sql">worker</span></td>
+  <td>modifying</td><td>self_review_done</td><td>5</td><td>6</td>
+  <td style="font-size:0.7rem;">{self_review_json}</td>
+</tr>
+<tr>
+  <td>7</td><td><span class="badge badge-sql">worker</span></td>
+  <td>self_review_done</td><td>completion_submitted</td><td>6</td><td>7</td>
+  <td style="font-size:0.7rem;">{commits_json, sync_notes, context_updates_json}</td>
+</tr>
+<tr>
+  <td>8</td><td><span class="badge badge-llm">orchestrator</span></td>
+  <td>completion_submitted</td><td>completed</td><td>7</td><td>8</td>
+  <td style="color:var(--muted);font-size:0.7rem;">NULL (纯SQL推进)</td>
+</tr>
+<tr>
+  <td>9</td><td><span class="badge badge-sql">worker</span></td>
+  <td>completed</td><td>lock_released</td><td>8</td><td>9</td>
+  <td style="color:var(--muted);font-size:0.7rem;">NULL (纯SQL推进)</td>
+</tr>
+</table>
+<p style="font-size:0.78rem;color:var(--yellow);margin-top:0.5rem;">
+  ⚡ 角色顺序：Orch×4 → Worker×3 → Orch×1 → Worker×1<br>
+  ⚡ payload=NULL 的行（id=5,8,9）对应三次纯 SQL 推进<br>
+  ⚡ init_pipeline 不产生 audit_log，audit_log 的 revision_before=0 是从第一次 transition_stage 开始的
+</p>
+</div>
+
+<div class="card" style="margin-top:1rem;">
+<p><strong>context 表（始终只有 id=1 一行）：</strong></p>
+<pre style="font-size:0.78rem;">
+id:                         1 (CHECK(id=1), INSERT OR IGNORE)
+boundaries_json:            {"py-agent":{"can_touch":["*.py"],"forbidden":["*.md","app/"]},
+                             "md-agent":{"can_touch":["*.md"],"forbidden":["*.py"]}}
+orchestrator_id:            a1b2c3d4
+orchestrator_heartbeat:     2026-05-24 12:05:30
+orchestrator_started_at:    2026-05-24 11:55:00
+orchestrator_current_task:  NULL (set_current_task/clear_current_task 管理)
+last_commit:                abc123def456
+agent_history_json:         []
+warnings_json:              []
+pipeline:                   NULL
+api_contract:               NULL
+meta_fields:                NULL</pre>
+</div>
+
+<!-- ============================================================ -->
+<!-- SECTION: 八 — 乐观锁 CAS 机制 -->
+<!-- ============================================================ -->
+<h2>八、乐观锁 (CAS) 机制：逐行拆解</h2>
+
+<h3>8.1 什么是乐观锁？</h3>
+<div class="card">
+<p>
+  <strong>悲观锁</strong>：读取前先锁定行（SELECT FOR UPDATE），其他人等锁释放才能读。<br>
+  <strong>乐观锁</strong>（本项目的选择）：读取时不加锁，写入时检查"我读到的值是否被改了"。<br>
+</p>
+<p style="margin-top:0.5rem;">
+  选择乐观锁的原因：<strong>两个 Agent 通过 <code>/loop</code> 异步轮询</strong>，大部分时间没有并发写入。
+  WAL 模式下读者不阻塞写者，乐观锁不需要锁管理器，零争用时零开销。
+</p>
+</div>
+
+<h3>8.2 CAS 三步曲（代码逐行追踪）</h3>
+
+<div class="card">
+<p style="color:var(--yellow);"><strong>Step 1 — 读取当前版本号</strong>（pipeline.py:78-88）</p>
+<pre>cur.execute(
+    "SELECT stage, revision FROM pipeline_state WHERE request_id=?",
+    (request_id,),
+)
+row = cur.fetchone()
+current_stage = row['stage']      <span style="color:var(--muted);"># 'request_submitted'</span>
+current_revision = row['revision'] <span style="color:var(--muted);"># 0</span></pre>
+<p style="color:var(--muted);font-size:0.82rem;">这一步不加锁。SQLite 在 WAL 模式下返回的是最后一次 commit 的快照。</p>
+
+<p style="color:var(--yellow);margin-top:1.25rem;"><strong>Step 2 — 比对调用者持有的版本号</strong>（pipeline.py:98-104）</p>
+<pre>if current_revision != revision:   <span style="color:var(--muted);"># 数据库的 0 != 调用者传入的 0?</span>
+    raise RuntimeError(
+        "Revision mismatch: expected {}, actual {}".format(
+            revision, current_revision,
+        )
+    )</pre>
+<p style="color:var(--muted);font-size:0.82rem;">
+  这是 CAS 的第一道防线：调用者必须先读再传。如果调用者拿着过时的 revision 来推进，这里直接拦截。<br>
+  但这道防线不能防止 TOCTOU（检查到使用的间隙）。真正的原子性保护在 Step 3。
+</p>
+
+<p style="color:var(--yellow);margin-top:1.25rem;"><strong>Step 3 — 原子 UPDATE + rowcount 判决</strong>（pipeline.py:143-152）</p>
+<pre>cur.execute("BEGIN")
+cur.execute(
+    "UPDATE pipeline_state "
+    "SET stage=?, revision=revision+1, updated_at=..., conflict_analysis_json=? "
+    "<span style='color:var(--red);'>WHERE request_id=? AND stage=? AND revision=?</span>",  <span style="color:var(--muted);">← 三条件原子检查</span>
+    [new_stage, conflict_json, request_id, current_stage, current_revision],
+)
+<span style='color:var(--red);'>if cur.rowcount == 0:
+    raise RuntimeError("CAS failed: concurrent modification")</span>  <span style="color:var(--muted);">← 乐观锁判决</span>
+cur.execute("INSERT INTO audit_log ...")
+conn.commit()  <span style="color:var(--muted);">← UPDATE + audit_log 同一事务，全或无</span></pre>
+
+<p style="color:var(--muted);font-size:0.82rem;">
+  <strong>为什么 rowcount=0 就是"有人抢先了"？</strong><br>
+  UPDATE 的 WHERE 带了 <code>stage=? AND revision=?</code>。如果另一个 Agent 在我读之后、我写之前已经推进了 stage，那么数据库中的 stage 和 revision 都已变化，WHERE 条件不匹配 → 影响 0 行 → rowcount=0。<br><br>
+  这个检查是 <strong>原子性的</strong>——SQLite 的行级锁保证 UPDATE 的 WHERE 匹配和写入是一个不可分割的操作。不存在"查的时候匹配但写的时候被改"的窗口。
+</p>
+</div>
+
+<h3>8.3 并发冲突场景模拟</h3>
+
+<div class="card">
+<pre style="line-height:1.8;font-size:0.82rem;">
+时间线 →
+
+Worker A (orchestrator)                        Worker B (也抢到了 orchestrator)
+────────────────────────                        ──────────────────────────────
+t1: SELECT stage, revision
+    → ('request_submitted', 0)
+
+                                                t2: SELECT stage, revision
+                                                    → ('request_submitted', 0)
+
+t3: UPDATE ... WHERE revision=<span style="color:var(--red);">0</span>
+    → rowcount = <span style="color:var(--green);">1</span> ✓ 成功
+    → revision 变为 <span style="color:var(--green);">1</span>
+    → COMMIT
+
+                                                t4: UPDATE ... WHERE revision=<span style="color:var(--red);">0</span>
+                                                    → rowcount = <span style="color:var(--red);">0</span> ✗ CAS 失败！
+                                                    → ROLLBACK
+                                                    → 抛出 RuntimeError
+
+                                                t5: 重新 SELECT → revision=1
+                                                    用 revision=1 重试 → 成功
+
+结果: 两次推进都成功，revision 最终=2。没有丢失更新，没有覆盖。
+     这是测试 test_pipeline.py:219-245 验证的并发场景。
+</pre>
+</div>
+
+<h3>8.4 SQL Trigger 兜底</h3>
+<p class="dim">代码：<code>orchestrator.py:126-147</code></p>
+
+<div class="card">
+<p>即使有人绕过 pipeline.py 直接执行裸 SQL，SQLite trigger 仍然会拦截：</p>
+<pre style="font-size:0.82rem;">
+<span style="color:var(--muted);">-- 试图跳过 revision（不 +1）</span>
+UPDATE pipeline_state SET stage='approved', revision=<span style="color:var(--red);">5</span>
+WHERE request_id='...';
+<span style="color:var(--red);">→ ABORT: 'CAS failure: revision must increment by 1'</span>
+
+<span style="color:var(--muted);">-- 试图非法转移（跳过中间 stage）</span>
+UPDATE pipeline_state SET stage='approved', revision=revision+1
+WHERE request_id='...' AND stage='request_submitted';
+<span style="color:var(--red);">→ ABORT: 'Invalid transition: request_submitted -> approved'</span>
+<span style="color:var(--muted);">  (正确路径必须经过 conflict → boundary → logic 才能到 approved)</span></pre>
+
+<p style="font-size:0.82rem;color:var(--muted);margin-top:0.5rem;">
+  Trigger 定义在 <code>BEFORE UPDATE ON pipeline_state WHEN OLD.stage != NEW.stage</code>。<br>
+  只在 stage 变化时触发，同 stage 更新其他字段不受限制。<br>
+  两个 CASE WHEN 串联——第一个检查 revision 递增，第二个检查转移路径白名单。
+</p>
+</div>
+
+<!-- ============================================================ -->
+<!-- SECTION: 九 — WAL 模式 -->
+<!-- ============================================================ -->
+<h2>九、WAL 模式：并发读写分离原理</h2>
+
+<h3>9.1 WAL 是什么</h3>
+<div class="card">
+<p>
+  WAL = Write-Ahead Logging。SQLite 默认是 rollback journal 模式（DELETE），WAL 是替代方案。
+</p>
+
+<table style="margin-top:0.75rem;">
+<tr><th></th><th>默认 (DELETE Journal)</th><th>WAL (本项目)</th></tr>
+<tr>
+  <td><strong>写入方式</strong></td>
+  <td>直接写主 DB 文件，旧页备份到 journal</td>
+  <td>新数据追加写入 WAL 文件（-wal），不碰主 DB</td>
+</tr>
+<tr>
+  <td><strong>读者数量</strong></td>
+  <td>1 读者 或 1 写者（互斥）</td>
+  <td><strong>无限读者 + 1 写者（不互斥）</strong></td>
+</tr>
+<tr>
+  <td><strong>读-写并发</strong></td>
+  <td style="color:var(--red);">写者阻塞所有读者</td>
+  <td style="color:var(--green);">写者不阻塞读者，读者不阻塞写者</td>
+</tr>
+<tr>
+  <td><strong>写-写并发</strong></td>
+  <td>串行（第二个等 busy_timeout）</td>
+  <td>串行（同上）</td>
+</tr>
+<tr>
+  <td><strong>文件</strong></td>
+  <td>xxx.db + xxx.db-journal</td>
+  <td>xxx.db + xxx.db-wal + xxx.db-shm</td>
+</tr>
+</table>
+
+<p style="margin-top:0.75rem;font-size:0.85rem;">
+  <strong>为什么 WAL 对本项目至关重要：</strong><br>
+  Orchestrator 通过 <code>/loop 60s</code> 定时 invoke，每次调用可能执行多次 <code>transition_stage()</code>（连续写入）。<br>
+  Worker 同时通过 <code>/loop 30s</code> 轮询 <code>get_pipeline()</code>（SELECT 读取）。<br>
+  <strong>没有 WAL</strong>：Worker 的 SELECT 会被 Orchestrator 的 UPDATE 事务阻塞，轮询延迟不可预测。<br>
+  <strong>有 WAL</strong>：Worker 读到最后一次 commit 的快照，不受 Orch 写入影响，30s 轮询节奏稳定。
+</p>
+</div>
+
+<h3>9.2 WAL 在本项目中的配置</h3>
+<div class="card">
+<pre><span style="color:var(--muted);">-- orchestrator.py:43-44 (_connect 方法，每次连接都执行)</span>
+PRAGMA journal_mode=WAL;       <span style="color:var(--muted);">-- 启用 WAL 模式</span>
+PRAGMA busy_timeout=5000;      <span style="color:var(--muted);">-- 写锁等待 5 秒（仅写-写冲突时生效）</span>
+
+<span style="color:var(--muted);">-- orchestrator.py:52-53 (init_db)</span>
+PRAGMA synchronous=NORMAL;     <span style="color:var(--muted);">-- WAL 模式下 NORMAL 足够安全，比 FULL 快很多</span>
+PRAGMA foreign_keys=ON;        <span style="color:var(--muted);">-- 启用外键约束检查</span></pre>
+</div>
+
+<h3>9.3 WAL 的三种读操作模式</h3>
+<div class="card">
+<table>
+<tr><th>操作</th><th>代码位置</th><th>WAL 行为</th></tr>
+<tr>
+  <td><strong>只读查询</strong><br><code>get_pipeline()</code><br><code>get_requests_by_stage()</code><br><code>get_boundaries()</code></td>
+  <td><code>orchestrator.py:397-451</code><br><code>orchestrator.py:471-479</code></td>
+  <td>读最后 commit 的快照。即使 Orch 正在写事务中，Worker 读到的是写之前的完整状态。WAL 保证读到的是 <strong>一致快照</strong>——不会读到半更新的行。</td>
+</tr>
+<tr>
+  <td><strong>事务写</strong><br><code>transition_stage()</code></td>
+  <td><code>pipeline.py:143-169</code></td>
+  <td>BEGIN → UPDATE + INSERT → COMMIT。新数据追加到 WAL 文件。COMMIT 后其他连接立即可见。</td>
+</tr>
+<tr>
+  <td><strong>读-改-写</strong><br><code>transition_stage()</code> 内</td>
+  <td><code>pipeline.py:78-149</code></td>
+  <td>先 SELECT（读快照），再 UPDATE（带 WHERE revision=旧值）。如果中间有人改了，WHERE 不匹配 → rowcount=0 → CAS 失败。WAL 保证了快照隔离。</td>
+</tr>
+</table>
+</div>
+
+<h3>9.4 WAL 文件管理与 Checkpoint</h3>
+<div class="card">
+<p style="font-size:0.85rem;">
+  WAL 文件会随着写入无限增长。SQLite 在 WAL 文件达到 1000 页（约 4MB）时自动执行 checkpoint——将 WAL 内容合并回主 DB。
+</p>
+<p style="font-size:0.85rem;color:var(--muted);margin-top:0.5rem;">
+  本项目在 <code>orchestrator-role/SKILL.md:283</code> 记录了手动 checkpoint 命令：<code>PRAGMA wal_checkpoint(TRUNCATE)</code>——用于异常情况下 WAL 文件过大的清理。
+</p>
+</div>
+
+<!-- ============================================================ -->
+<!-- SECTION: 十 — SQLite 功能边界 -->
+<!-- ============================================================ -->
+<h2>十、SQLite 功能边界：它做了什么，没做什么</h2>
+
+<div class="mech-grid">
+
+  <div class="mech-card" style="border-left-color:var(--green);">
+    <h4 style="color:var(--green);">SQLite 负责的部分</h4>
+    <table style="font-size:0.82rem;">
+    <tr><td><strong>持久化存储</strong></td><td>三张表：pipeline_state（状态）、context（配置+心跳）、audit_log（审计）</td></tr>
+    <tr><td><strong>原子性</strong></td><td>BEGIN + COMMIT / ROLLBACK 保证 UPDATE + INSERT audit_log 全或无</td></tr>
+    <tr><td><strong>CAS 原子检查</strong></td><td>UPDATE WHERE revision=? 的条件匹配 + rowcount 判决是原子操作</td></tr>
+    <tr><td><strong>WAL 读写分离</strong></td><td>写者不阻塞读者，支持 Worker 轮询 + Orch 写入并发</td></tr>
+    <tr><td><strong>Trigger 兜底</strong></td><td>tr_stage_transition：即使裸 SQL 也无法非法转移或 revision 跳号</td></tr>
+    <tr><td><strong>CHECK 约束</strong></td><td>stage 列只接受 11 个合法值</td></tr>
+    <tr><td><strong>PRIMARY KEY</strong></td><td>request_id 唯一，防止重复创建</td></tr>
+    <tr><td><strong>索引加速</strong></td><td>idx_pipeline_stage（按 stage 查询）、idx_pipeline_agent（按 agent 查询）</td></tr>
+    <tr><td><strong>时间戳</strong></td><td>DEFAULT datetime('now','localtime') 自动生成</td></tr>
+    <tr><td><strong>写锁排队</strong></td><td>busy_timeout=5000ms，写-写冲突时第二个等待而非立即失败</td></tr>
+    </table>
+  </div>
+
+  <div class="mech-card" style="border-left-color:var(--red);">
+    <h4 style="color:var(--red);">SQLite 不负责的部分<br><span style="font-size:0.78rem;font-weight:400;">（应用层 / LLM 承担）</span></h4>
+    <table style="font-size:0.82rem;">
+    <tr><td><strong>转移路径逻辑</strong></td><td>VALID_TRANSITIONS dict 在 Python 中定义，pipeline.py:11-21。SQLite 不知道哪些转移合法——trigger 中硬编码了同样的白名单，但那只是兜底</td></tr>
+    <tr><td><strong>角色权限</strong></td><td>ROLE_PERMISSIONS dict 在 Python 中定义，pipeline.py:24-38。SQLite 不知道谁是 orchestrator 谁是 worker</td></tr>
+    <tr><td><strong>字段白名单</strong></td><td>ALLOWED_COLUMNS set 在 Python 中定义，pipeline.py:41-48。SQLite 接受任何列名</td></tr>
+    <tr><td><strong>JSON 结构校验</strong></td><td>所有 *_json 列存储为 TEXT——SQLite 不校验 JSON 是否合法、字段是否齐全、类型是否正确。LLM 输出 key 名拼错不会报错</td></tr>
+    <tr><td><strong>LLM 内容理解</strong></td><td>JSON 列中的语义（冲突分析、边界判断、逻辑变更）对 SQLite 是完全不透明的字符串</td></tr>
+    <tr><td><strong>重试逻辑</strong></td><td>CAS 失败后的重试（最多 3 次）在 SKILL.md 中描述，由 Agent 自行实现，不在 pipeline.py 中</td></tr>
+    <tr><td><strong>心跳超时判断</strong></td><td>90 秒超时是应用层逻辑（orchestrator.py:213），SQLite 只存储时间戳字符串</td></tr>
+    <tr><td><strong>孤儿锁回收</strong></td><td>resolve_orphan_locks() 的 120 秒超时是业务决策（orchestrator.py:323-350），SQLite 不主动清理</td></tr>
+    <tr><td><strong>角色注册</strong></td><td>try_register() 用 UPDATE rowcount 做 CAS 注册（orchestrator.py:229-241），竞争逻辑在应用层</td></tr>
+    <tr><td><strong>Agent 活跃互斥</strong></td><td>init_pipeline() 检查同 agent 是否有活跃 pipeline——Python 层面的 SELECT + 判断 + INSERT，非 SQL 约束</td></tr>
+    </table>
+  </div>
+
+</div>
+
+<div class="card" style="border-left:3px solid var(--accent); margin-top:1rem;">
+<h3>边界总结</h3>
+<p>
+  SQLite 在这里的定位是：<strong>一个提供原子性、持久性、并发安全的状态存储器</strong>。<br>
+  它不参与任何决策——不判断"这个转移合法吗"，不校验"LLM 输出的 JSON 格式对吗"，不决定"谁可以推进"。<br><br>
+  这些全部是 <strong>pipeline.py 的 Python 逻辑 + SKILL.md 的 LLM 指令</strong> 负责。<br>
+  SQLite 的 Trigger 是最后一道防线——万一 Python 逻辑有 bug，裸 SQL 也无法破坏数据一致性。<br>
+  WAL 是并发基础设施——确保两个 Agent 的异步轮询不会互相阻塞。
+</p>
+</div>
+
+<!-- ============================================================ -->
+<!-- SECTION: 十一 — 安全机制总览 -->
+<!-- ============================================================ -->
+<h2>十一、安全保障：四层防护总览</h2>
+
+<div class="card">
+<table>
+<tr><th>层级</th><th>机制</th><th>代码</th><th>防护什么</th></tr>
+<tr>
+  <td><strong>应用层</strong></td>
+  <td><strong>CAS (Compare-And-Swap)</strong></td>
+  <td><code>pipeline.py:97-103</code><br><code>pipeline.py:143-151</code></td>
+  <td>
+    <strong>两段检查：</strong><br>
+    ① 推进前：传入 revision == 数据库 revision？(line 98)<br>
+    ② 推进中：UPDATE 带 <code>WHERE revision=?</code>，rowcount=0 → CAS 失败 (line 151)<br>
+    ① 是快速失败（避免无效事务），② 是原子保证（不可分割的检查和写入）。<br>
+    测试：<code>test_pipeline.py:219-245</code>（双线程并发，仅一个成功）
+  </td>
+</tr>
+<tr>
+  <td><strong>数据库层</strong></td>
+  <td><strong>SQL Trigger</strong></td>
+  <td><code>orchestrator.py:126-147</code></td>
+  <td>
+    <code>tr_stage_transition</code>：BEFORE UPDATE，仅当 stage 变化时触发。<br>
+    ① <code>NEW.revision != OLD.revision + 1 → ABORT</code><br>
+    ② 转移路径不在硬编码白名单 → ABORT<br>
+    即使绕过 pipeline.py 裸写 SQL，也无法非法转移或跳 revision。
+  </td>
+</tr>
+<tr>
+  <td><strong>权限层</strong></td>
+  <td><strong>Role Permission</strong></td>
+  <td><code>pipeline.py:24-38</code><br><code>pipeline.py:106-112</code></td>
+  <td>
+    Worker 只能从 approved/modifying/self_review_done/completed 推进。<br>
+    Orch 只能从 request_submitted/*_analysis_done/completion_submitted 推进。<br>
+    测试：<code>test_pipeline.py:74-110</code>（双向 PermissionError）
+  </td>
+</tr>
+<tr>
+  <td><strong>字段层</strong></td>
+  <td><strong>Column Whitelist</strong></td>
+  <td><code>pipeline.py:40-47</code><br><code>pipeline.py:124</code></td>
+  <td>
+    <code>**kwargs</code> 中非白名单列名被静默过滤。<br>
+    但注意：白名单只过滤列名，不校验 JSON 结构（见 §十）。<br>
+    测试：<code>test_pipeline.py:138-155</code>（not_a_real_column 被过滤）
+  </td>
+</tr>
+</table>
+</div>
+
+<!-- ============================================================ -->
+<!-- SECTION: 十二 — 逻辑链总结 -->
+<!-- ============================================================ -->
+<h2>十二、逻辑链总结</h2>
+
+<div class="card" style="border-left: 3px solid var(--accent);">
+<pre style="background:transparent;border:none;padding:0.5rem 0;line-height:2;">
+Worker 发起                              Orchestrator 审查
+┌──────────────────┐                   ┌──────────────────────┐
+│ 1. 声明意图       │                   │ 1. Lint 程序预检      │
+│    reason         │ ───SQL+JSON──▶    │    过→继续 不过→reject│
+│    scope_json     │                   │ 2. 冲突分析 (LLM)     │
+│    plan_json      │                   │    → conflict_analysis│
+│    constraints    │                   │ 3. 边界分析 (LLM)     │
+│ 2. 等待审批       │ ◀───SQL+JSON──    │    → boundary_analysis│
+│    /loop 轮询     │    granted_scope  │ 4. 逻辑分析 (LLM)     │
+│ 3. 执行修改       │                   │    → logic_analysis   │
+│    (纯SQL推进)    │ ───纯SQL──▶       │ 5. 签发 approved/     │
+│ 4. 自审 (LLM)     │                   │    rejected           │
+│    → self_review  │ ───SQL+JSON──▶    │                      │
+│ 5. 提交 completion│                   │ 6. 验证 completion    │
+│    → commits_json │ ───SQL+JSON──▶    │    (纯SQL推进)        │
+│ 6. 释锁           │                   │                      │
+│    (纯SQL推进)    │ ───纯SQL──▶       │                      │
+└──────────────────┘                   └──────────────────────┘
+
+传递模式统计：
+  纯 SQL 推进:  3 次 (modifying, completed, lock_released)
+  SQL + JSON:   7 次 (含 init INSERT)
+  其中双边接力:  3 条链路 (scope链, self_review链, completion链)
+
+LLM 传递统计：
+  Worker→Orch: 10 个字段
+  Orch→Worker: 1 个字段 (granted_scope_json)
+
+SQLite 角色：
+  存储 + 原子性(CAS rowcount) + 并发安全(WAL) + 兜底(Trigger) + 索引加速
+  不做：业务逻辑、JSON校验、LLM理解、重试、心跳超时、角色注册
+
+乐观锁 = Python 读 revision → UPDATE WHERE revision=? → rowcount 判决
+WAL     = 写者不阻塞读者，确保 /loop 轮询不因对方写入而卡住
+Trigger = 裸 SQL 也无法非法转移或 revision 跳号（数据库层兜底）</pre>
+</div>
+
+<p style="text-align:center;color:var(--muted);margin:2rem 0 1rem;font-size:0.82rem;">
+  基于 GitHub <code>GaaZeon-Hui/orchestration-protocol@030949d</code> 逐文件逐行核对 · 2026-05-24<br>
+  源码引用：pipeline.py (181行) · orchestrator.py (525行) · lint.py (280行) · status.py (173行)
+</p>
+
+</body>
+</html>

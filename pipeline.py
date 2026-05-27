@@ -9,42 +9,38 @@ import sqlite3
 # ── Constants ───────────────────────────────────────────────
 
 VALID_TRANSITIONS = {
-    'request_submitted':      ['conflict_analysis_done', 'rejected'],
-    'conflict_analysis_done': ['boundary_analysis_done'],
-    'boundary_analysis_done': ['logic_analysis_done'],
-    'logic_analysis_done':    ['approved', 'rejected'],
-    'approved':               ['modifying'],
-    'modifying':              ['self_review_done'],
-    'self_review_done':       ['completion_submitted'],
-    'completion_submitted':   ['completed'],
-    'completed':              ['lock_released'],
+    'init':                 ['orchestrator_gate'],
+    'orchestrator_gate':    ['worker_modify', 'rejected'],
+    'worker_modify':        ['reviewer_check'],
+    'reviewer_check':       ['orchestrator_arbiter'],
+    'orchestrator_arbiter': ['verified', 'worker_modify'],
+    'verified':             ['lock_released'],
 }
 
 # role -> set of from_stage values this role is allowed to advance
 ROLE_PERMISSIONS = {
-    'worker': {
-        'approved',
-        'modifying',
-        'self_review_done',
-        'completed',
-    },
-    'orchestrator': {
-        'request_submitted',
-        'conflict_analysis_done',
-        'boundary_analysis_done',
-        'logic_analysis_done',
-        'completion_submitted',
-        'completed',  # orphan lock takeover
-    },
+    'worker':        {'init', 'worker_modify', 'verified'},
+    'orchestrator':  {'orchestrator_gate', 'orchestrator_arbiter', 'verified', 'worker_modify'},
+    'reviewer':      {'reviewer_check'},
 }
 
 ALLOWED_COLUMNS = {
-    'reason', 'scope_json', 'plan_json', 'self_review_json',
-    'constraints_json',
-    'approval_status', 'granted_scope_json', 'rejection_reason',
-    'reviewed_by',
-    'completed_at', 'commits_json', 'sync_notes', 'context_updates_json',
-    'conflict_analysis_json', 'boundary_analysis_json', 'logic_analysis_json',
+    # Worker init
+    'reason_json', 'plan_json',
+    # Worker correction rounds
+    'plan_r2', 'plan_r3', 'plan_r4',
+    # Worker execution
+    'commits_json',
+    # Orch gate
+    'approval_status', 'rejection_reason',
+    # Orch arbiter
+    'feedback_r1', 'feedback_r2', 'feedback_r3', 'feedback_r4',
+    # Reviewer
+    'completion_r1', 'completion_r2', 'completion_r3', 'completion_r4',
+    # Orch human intervention
+    'human_intervention',
+    # Counter
+    'review_round',
 }
 
 TERMINAL_STAGES = {'rejected', 'lock_released'}
@@ -111,15 +107,6 @@ def transition_stage(request_id, new_stage, role, revision, db_path, **kwargs):
                 role, current_stage,
             )
         )
-
-    # modifying → self_review_done must carry evidence of changes
-    if current_stage == 'modifying' and new_stage == 'self_review_done':
-        if not kwargs.get('self_review_json'):
-            conn.close()
-            raise ValueError(
-                "self_review_json is required when advancing from "
-                "modifying to self_review_done"
-            )
 
     # Whitelist filter kwargs
     filtered = {k: v for k, v in kwargs.items() if k in ALLOWED_COLUMNS}

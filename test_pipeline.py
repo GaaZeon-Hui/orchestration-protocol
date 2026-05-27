@@ -329,6 +329,28 @@ class TestTransitionStage(unittest.TestCase):
         self.assertEqual(p3["boundary_analysis_json"], {"warnings": ["edge case in core"]})
         self.assertEqual(p3["logic_analysis_json"], {"new_functions": ["foo"]})
 
+    # ── 8. new architecture constants ─────────────────────────
+
+    def test_valid_transitions_new_architecture(self):
+        """Every non-terminal stage must have outgoing transitions."""
+        all_stages = {'init', 'orchestrator_gate', 'worker_modify',
+                      'reviewer_check', 'orchestrator_arbiter',
+                      'verified', 'lock_released', 'rejected'}
+        defined_sources = set(VALID_TRANSITIONS.keys())
+        defined_targets = {t for targets in VALID_TRANSITIONS.values() for t in targets}
+        all_defined = defined_sources | defined_targets
+        self.assertTrue(all_stages.issubset(all_defined))
+        for ts in TERMINAL_STAGES:
+            self.assertNotIn(ts, VALID_TRANSITIONS)
+
+    def test_role_permissions_new_architecture(self):
+        """Reviewer exists and has reviewer_check; Orch has worker_modify + verified."""
+        self.assertIn('reviewer', ROLE_PERMISSIONS)
+        self.assertEqual(ROLE_PERMISSIONS['reviewer'], {'reviewer_check'})
+        self.assertIn('worker_modify', ROLE_PERMISSIONS['orchestrator'])
+        self.assertIn('verified', ROLE_PERMISSIONS['orchestrator'])
+        self.assertIn('worker_modify', ROLE_PERMISSIONS['worker'])
+
 
 if __name__ == "__main__":
     unittest.main()

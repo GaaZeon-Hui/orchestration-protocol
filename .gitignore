@@ -27,3 +27,8 @@ orchestrator.db
 
 # Design notes (not part of the distributed skill)
 更新/
+
+
+# Added by cargo
+
+/target

@@ -1,51 +1,41 @@
-# Orchestration Protocol — Claude Code 多 Agent 编排系统
+# Orchestration Protocol — 轻量多 Agent 编排协议
 
-纯 Python 标准库实现，零外部依赖，极低部署门槛~
+纯 Python 标准库实现，零外部依赖。基于 SQLite 状态机 + CAS 乐观锁的三角色协作编排工具，专为 Claude Code 设计。
 
-基于 SQLite 的 pipeline 状态机编排协议。**Orchestrator**（编排者）和 **Worker**（工作者）通过 `pipeline_state` 单表 + `transition_stage()` CAS 推进完成请求审批、修改、验证的完整闭环。
-
-本项目专为 Claude Code 环境设计，填补了 "极轻量级、零依赖、SQLite 驱动" 的多 Agent 协作编排工具空白。其 "单表" 哲学和 CAS 乐观锁机制在轻量级场景中独树一帜。
-
+**Worker** 发起修改请求 → **Orchestrator** 准入审批 → **Reviewer** 独立验证 commit 是否符合计划 → **Orchestrator** 仲裁 → 释锁闭环。`review_round` 计数器支持最多 4 轮修正回路，超出自动触发人工介入机制。
 
 ## 架构
 
 ```
-┌─────────────────────────┐         ┌─────────────────────────┐
-│     Orchestrator        │         │     Worker Agent        │
-│                         │  SQLite │                         │
-│ • 哨兵检查              │◄───────►│ • init_pipeline         │
-│ • 冲突/越界/逻辑分析    │   WAL   │ • 轮询等待审批          │
-│ • transition_stage()    │         │ • transition_stage()    │
-│   审批/reject           │         │   推进 modifying → done │
-│ • 验证 completion       │         │ • 自审 + completion    │
-│ • 心跳维护              │         │ • 跨会话崩溃恢复       │
-└──────────┬──────────────┘         └───────────┬─────────────┘
-           │                                    │
-           │        pipeline.py                 │
-           │   ┌──────────────────┐             │
-           └──►│ transition_stage │◄────────────┘
-               │ VALID_TRANSITIONS│
-               │ ROLE_PERMISSIONS │
-               │ + audit_log      │
-               └──────────────────┘
+  Worker ── reason + plan ──▶ Orchestrator (gate)
+                                  │ Lint 过
+  Worker ◀── approved ───────────┘
+    │ 修改代码
+    ▼
+  Reviewer ── completion ──▶ Orchestrator (arbiter)
+                                  │
+              ┌───────────────────┤
+              ▼                   ▼
+          verified          worker_modify (修正回路)
+              │                   │
+              ▼                   └──▶ Reviewer ──▶ Orch ──▶ ...
+          lock_released
 ```
 
 ## 核心设计
 
-| 决策 | 理由 |
+| 维度 | 机制 |
 |------|------|
-| `pipeline_state` 单表替代 5 表 | 一表承载完整生命周期，无需 JOIN |
-| `pipeline.py` 独立模块 | `transition_stage()` 脱离 Orchestrator 类，Worker 也可调用 |
-| `lint.py` 程序化预检 | 越界 glob match（阻塞级）+ 冲突 git diff 交集 + AST 变更提取（信息级），不过的直接 reject |
-| `transition_stage()` CAS | `WHERE stage=? AND revision=?` 保证并发安全 |
-| `ROLE_PERMISSIONS` 权限矩阵 | Python 层拦截越权推进，role 只能从授权 stage 发起转移 |
-| `audit_log` 自动审计 | 每次 stage 转移追加一行，payload_json 仅存变更列，不可跳过 |
-| SQL trigger `tr_stage_transition` | DB 层兜底校验转移合法性+CAS |
-| WAL 模式 | 读不阻塞写，多个 Worker 可同时读写不同行 |
-| 心跳自动接任 | 编排者死亡 90s 内自动检测，下个 agent 接替 |
-| `recover_pipeline()` | 崩溃后按断点 stage 续跑，无需 MCP 外部记忆 |
-| 分析中间态持久化 | `conflict/boundary/logic_analysis_json` 列保存审查结论，崩溃恢复不重做 |
-| `init_pipeline()` 同 agent 互斥 | 同 agent 有活跃 pipeline 时禁止创建新的，防止并发冲突 |
+| **Stage** | 7 个命名 stage（init → orch_gate → worker_modify → reviewer_check → orch_arbiter → verified → lock_released） |
+| **修正回路** | `review_round` 计数器，4 轮上限，超限触发人工介入 |
+| **CAS** | `WHERE stage=? AND revision=?` 原子推进，rowcount=0 即并发冲突 |
+| **权限** | `ROLE_PERMISSIONS` 矩阵——Worker/Orch/Reviewer 各有专属 stage |
+| **白名单** | `ALLOWED_COLUMNS` 静默过滤非法字段 |
+| **Trigger** | `tr_stage_transition` DB 层兜底——裸 SQL 也无法非法转移 |
+| **WAL** | 写不阻塞读，多 Agent 并行 `/loop` 轮询 |
+| **审计** | `audit_log` 每次转移追加不可变记录 |
+| **Lint** | 三模块——`lint_gate`（Gate 轻量）· `lint_full`（Reviewer 完整）· `lint_crossref`（三方交叉验证） |
+| **人工介入** | `human_intervention` 列，Orch 标记后 status.py 面板标红 |
 
 ## 安装
 
@@ -54,101 +44,42 @@ git clone https://github.com/GaaZeon-Hui/orchestration-protocol.git
 cd orchestration-protocol
 ```
 
-仅依赖 Python 3 标准库（`sqlite3`）。
+仅需 Python 3（`sqlite3` 标准库）。
 
 ## 使用
 
-在此目录下启动 Claude Code 会话。Agent 读取 `CLAUDE.md` → 导入 `orchestrator.py` → 自动执行角色注册。
+在此目录下启动 Claude Code。Agent 读取 `CLAUDE.md` → 注册角色 → 按 SKILL.md 指令执行。
 
 ## 文件结构
 
 ```
-├── pipeline.py                     # 独立协议模块 — transition_stage() + 常量
-├── orchestrator.py                 # Python 库 — 查询 + 角色注册 + heartbeat
-├── lint.py                         # 程序化预检 — 越界检查 + 冲突检测 + AST 提取
-├── test_pipeline.py                # pipeline.py 单元测试
-├── test_orchestrator.py            # orchestrator.py 集成测试
-├── test_lint.py                    # lint.py 单元测试
-├── CLAUDE.md                       # 启动入口
-├── README.md
-├── README_EN.md
-├── 审查报告.md                     # 架构审查与问题追踪
-├── .gitignore
-├── .claude/
-│   ├── settings.json               # 插件配置（superpowers）
-│   └── skills/
-│       ├── orchestration-protocol/
-│       │   └── SKILL.md            # 角色注册 + Schema + 权限矩阵
-│       ├── orchestrator-role/
-│       │   └── SKILL.md            # 编排者完整指令
-│       └── worker-role/
-│           └── SKILL.md            # 工作者完整指令
+pipeline.py           — 状态机核心 · transition_stage()
+orchestrator.py       — DB 层 · CRUD · 心跳 · 孤儿锁
+lint_core.py          — 越界 glob 匹配 (共用)
+lint_gate.py          — plan 校验 · orchestrator_gate 用
+lint_full.py          — AST + 冲突 + lint_crossref · reviewer_check 用
+status.py             — 终端监控面板
+test_*.py             — 90 个单元/集成测试
+.claude/skills/       — 3 角色 LLM 行为指令
+docs/                 — 架构文档 · HTML 分析 · 实施计划
+archive/v1/           — 旧版设计笔记
 ```
 
-## 工作流程
+## 权限矩阵
 
-### Worker（pipeline stage 驱动）
-
-```
-Step 0  配置边界     → orc.get_boundaries() / orc.set_boundaries()
-Step 1  恢复上下文   → orc.get_pending_requests() / orc.recover_pipeline()
-Step 2  Pull + 读   → git pull, get_pipeline(), get_boundaries()
-Step 3  冲突检查     → orc.get_pending_requests(agent) 确认无活跃 pipeline
-Step 4  创建 pipeline → orc.init_pipeline()
-Step 5  等待审批     → get_pipeline() 单次检查，未审批则 /loop 复invoke
-Step 6  读审批       → get_pipeline() → granted_scope_json
-Step 7  修改         → transition_stage(approved→modifying, role='worker')
-                    → 仅改授权文件
-Step 8  自审         → 对照 boundaries + lint 检查
-                    → transition_stage(modifying→self_review_done, self_review_json=...)
-Step 9  Completion   → transition_stage(self_review_done→completion_submitted, ...)
-        + 释锁       → 等 completed → transition_stage(completed→lock_released)
-```
-
-### Orchestrator
-
-```
-1. orc.init_db() + orc.migrate()
-2. orc.get_boundaries()
-3. 哨兵检查 git log/diff
-4. 单次检查 orc.check_and_heartbeat(id) — 心跳 + 扫描新请求/completion
-   → 无事项时建议 /loop 60s 持续监控
-5. Lint 预检（越界→直接 reject；冲突+AST hints 喂给 LLM）
-6. 三项分析 → transition_stage(role='orchestrator') 逐级推进，每步保存分析 JSON
-7. 审批 → transition_stage(logic_analysis_done → approved/rejected)
-8. 验证 → 对照 git diff + lint hints
-9. 完成 → transition_stage(completion_submitted → completed)
-```
-
-## 权限矩阵（`pipeline.ROLE_PERMISSIONS`）
-
-| Role | 可发起 stage |
-|------|-------------|
-| **orchestrator** | `request_submitted`, `conflict_analysis_done`, `boundary_analysis_done`, `logic_analysis_done`, `completion_submitted` |
-| **worker** | `approved`, `modifying`, `self_review_done`, `completed` |
-
-## 模块边界（用户配置）
-
-首次启动时 Worker 提示用户设定各 agent 边界，存储在 `context.boundaries_json`。
-
-```json
-{
-  "py-agent": { "can_touch": ["*.py"], "forbidden": ["*.md", "app/", "service/"] },
-  "service-agent": { "can_touch": ["service/"], "forbidden": ["app/", "*.py", "*.md"] },
-  "ui-agent": { "can_touch": ["app/"], "forbidden": ["service/", "*.py", "*.md"] },
-  "md-agent": { "can_touch": ["*.md"], "forbidden": ["*.py", "app/", "service/"] }
-}
-```
+| Role | 可推进的 from_stage |
+|------|-------------------|
+| **Worker** | `init` · `worker_modify` · `verified` |
+| **Orchestrator** | `init` · `orchestrator_gate` · `orchestrator_arbiter` · `verified` · `worker_modify` |
+| **Reviewer** | `reviewer_check` |
 
 ## 测试
 
 ```bash
-python3 -m pytest test_pipeline.py -v       # transition_stage + 权限 + CAS + 分析持久化
-python3 -m pytest test_orchestrator.py -v   # 注册/心跳/全流程/崩溃恢复/并发互斥
-python3 -m pytest test_lint.py -v           # 越界检查/冲突检测/AST 解析/集成
-python3 -m pytest test_pipeline.py test_orchestrator.py test_lint.py -v  # 全部 74 测试
+python -m pytest test_pipeline.py test_orchestrator.py test_lint.py -v
+# 90 passed in ~2s
 ```
 
-
 ## License
-MIT License. See [LICENSE](LICENSE) file for details.
+
+MIT License.

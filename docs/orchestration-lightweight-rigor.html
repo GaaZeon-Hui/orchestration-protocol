@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Orchestration Protocol — Lightweight Rigor</title>
+<style>
+  :root {
+    --bg: #0a0e14; --card: #12171f; --border: #1e2632;
+    --text: #99a4b3; --hl: #c8d2e0; --muted: #545d6e;
+    --w: #5eaaff; --o: #b392f0; --r: #56d364;
+    --y: #e3b341; --red: #f7787b;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:var(--bg); color:var(--text); font-family:system-ui,'Segoe UI',sans-serif; line-height:1.6; }
+
+  .hero { text-align:center; padding:3rem 2rem 2rem; border-bottom:1px solid var(--border); }
+  .hero h1 { font-size:2.2rem; color:#fff; letter-spacing:-0.02em; }
+  .hero .sub { color:var(--muted); font-size:1.1rem; max-width:600px; margin:0.5rem auto; }
+  .hero .badges { margin-top:1rem; display:flex; gap:0.5rem; justify-content:center; flex-wrap:wrap; }
+  .badge { padding:0.2rem 0.8rem; border-radius:12px; font-size:0.78rem; border:1px solid var(--border); }
+  .bd-w { border-color:var(--w); color:var(--w); }
+  .bd-o { border-color:var(--o); color:var(--o); }
+  .bd-r { border-color:var(--r); color:var(--r); }
+  .bd-g { border-color:var(--muted); color:var(--muted); }
+
+  .container { max-width:1100px; margin:0 auto; padding:2rem; }
+  h2 { color:var(--hl); font-size:1.3rem; margin:2.5rem 0 1rem; }
+  h3 { color:var(--hl); font-size:1rem; margin:1.5rem 0 0.5rem; }
+
+  /* -- Big number row -- */
+  .num-row { display:flex; gap:1rem; margin:1.5rem 0; flex-wrap:wrap; }
+  .num-card { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:1rem 1.5rem; text-align:center; flex:1; min-width:120px; }
+  .num-card .n { font-size:2rem; font-weight:700; }
+  .num-card .l { font-size:0.8rem; color:var(--muted); }
+  .nc-w .n { color:var(--w); } .nc-o .n { color:var(--o); } .nc-r .n { color:var(--r); } .nc-g .n { color:var(--y); }
+
+  /* -- Safety layers -- */
+  .safety { display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:0.75rem; margin:1rem 0; }
+  .sf-card { background:var(--card); border-radius:10px; padding:1rem; border-left:3px solid; }
+  .sf-card h4 { color:var(--hl); margin-bottom:0.3rem; }
+  .sf-card p { font-size:0.82rem; }
+  .s1 { border-left-color:var(--w); } .s2 { border-left-color:var(--o); } .s3 { border-left-color:var(--r); } .s4 { border-left-color:var(--y); }
+
+  /* -- State flow SVG -- */
+  .flow-wrap { background:var(--card); border:1px solid var(--border); border-radius:14px; padding:1.5rem; margin:1rem 0; overflow-x:auto; }
+  .flow-wrap svg { display:block; margin:0 auto; }
+
+  /* -- Contrast pairs -- */
+  .pair-row { display:flex; gap:1rem; margin:1rem 0; flex-wrap:wrap; }
+  .pair { flex:1; min-width:300px; background:var(--card); border:1px solid var(--border); border-radius:10px; padding:1rem; }
+  .pair h4 { margin-bottom:0.5rem; }
+  .pair ul { font-size:0.84rem; margin-left:1.2rem; }
+  .pair.light h4 { color:var(--w); }
+  .pair.rigor h4 { color:var(--o); }
+
+  code { font-size:0.78rem; background:rgba(255,255,255,0.04); padding:0.1rem 0.35rem; border-radius:3px; }
+  pre { background:var(--card); border:1px solid var(--border); border-radius:8px; padding:1rem; font-size:0.78rem; overflow-x:auto; }
+  table { width:100%; border-collapse:collapse; margin:1rem 0; font-size:0.84rem; }
+  th { background:var(--card); text-align:left; padding:0.5rem 0.7rem; color:var(--hl); border-bottom:2px solid var(--border); font-size:0.75rem; text-transform:uppercase; }
+  td { padding:0.4rem 0.7rem; border-bottom:1px solid var(--border); }
+  tr:hover td { background:rgba(255,255,255,0.01); }
+</style>
+</head>
+<body>
+
+<div class="hero">
+  <h1>Orchestration Protocol</h1>
+  <p class="sub">纯 Python 标准库，零外部依赖，SQLite 状态机驱动。<br>轻量到可以打印在 A4 纸上读完，严谨到每一个转移都被四重校验。</p>
+  <div class="badges">
+    <span class="badge bd-w">stdlib only · 0 deps</span>
+    <span class="badge bd-o">5 source files · ~650 lines</span>
+    <span class="badge bd-r">90 tests · 0 failures</span>
+    <span class="badge bd-g">3 roles · 7 stages</span>
+  </div>
+</div>
+
+<div class="container">
+
+<!-- ====== 数字一览 ====== -->
+<div class="num-row">
+  <div class="num-card nc-w"><div class="n">0</div><div class="l">外部依赖</div></div>
+  <div class="num-card nc-o"><div class="n">5</div><div class="l">源代码文件</div></div>
+  <div class="num-card nc-r"><div class="n">90</div><div class="l">自动化测试</div></div>
+  <div class="num-card nc-g"><div class="n">4</div><div class="l">安全层</div></div>
+</div>
+
+<!-- ====== 轻量 vs 严谨 ====== -->
+<div class="pair-row">
+  <div class="pair light">
+    <h4>轻量</h4>
+    <ul>
+      <li>纯 Python 3 stdlib —— <code>import sqlite3</code> 即用</li>
+      <li>5 个源文件：pipeline · orchestrator · lint_core · lint_gate · lint_full</li>
+      <li>单二进制状态机 —— 无需 Redis、无需消息队列</li>
+      <li>LLM 通过 <code>/loop 60s</code> 异步轮询 —— 无长驻进程</li>
+      <li>安装即 <code>git clone</code> · 启动即 <code>python orchestrator.py</code></li>
+    </ul>
+  </div>
+  <div class="pair rigor">
+    <h4>严谨</h4>
+    <ul>
+      <li>CAS 乐观锁 —— <code>WHERE revision=? AND stage=?</code> 原子推进</li>
+      <li>SQL Trigger 兜底 —— 绕过 Python 裸写 SQL 也无法非法转移</li>
+      <li>ROLE_PERMISSIONS 权限矩阵 —— 每个角色只能从授权 stage 推进</li>
+      <li>ALLOWED_COLUMNS 白名单 —— 非白名单字段静默过滤</li>
+      <li>audit_log 全链路审计 —— 每次转移追加不可变记录</li>
+      <li>WAL 模式 —— 读不阻塞写，多 Agent 并行轮询</li>
+      <li>valid_transitions 枚举 —— 漏写 arm 编译过不了</li>
+    </ul>
+  </div>
+</div>
+
+<!-- ====== 状态机流转图 ====== -->
+<h2>状态机全览</h2>
+
+<div class="flow-wrap">
+<svg viewBox="0 0 1050 280" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <marker id="aw" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto"><path d="M0,0 L7,2.5 L0,5 Z" fill="#5eaaff"/></marker>
+    <marker id="ao" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto"><path d="M0,0 L7,2.5 L0,5 Z" fill="#b392f0"/></marker>
+    <marker id="ar" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto"><path d="M0,0 L7,2.5 L0,5 Z" fill="#56d364"/></marker>
+    <marker id="ax" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto"><path d="M0,0 L7,2.5 L0,5 Z" fill="#f7787b"/></marker>
+    <marker id="ay" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto"><path d="M0,0 L7,2.5 L0,5 Z" fill="#e3b341"/></marker>
+    <filter id="sh"><feDropShadow dx="0" dy="1.5" stdDeviation="2" flood-opacity="0.2"/></filter>
+  </defs>
+
+  <!-- Row: gate chain -->
+  <rect x="40" y="55" width="155" height="52" rx="8" fill="#0d2740" stroke="#2a5580" stroke-width="1.2" filter="url(#sh)"/>
+  <text x="117" y="75" text-anchor="middle" fill="#fff" font-size="11" font-weight="bold">init</text>
+  <text x="117" y="93" text-anchor="middle" fill="#7aaad4" font-size="8.5">Worker 发起</text>
+
+  <line x1="195" y1="81" x2="235" y2="81" stroke="#5eaaff" stroke-width="1.5" marker-end="url(#aw)"/>
+
+  <rect x="240" y="55" width="165" height="52" rx="8" fill="#1f1240" stroke="#4a2a7a" stroke-width="1.2" filter="url(#sh)"/>
+  <text x="322" y="75" text-anchor="middle" fill="#fff" font-size="11" font-weight="bold">orchestrator_gate</text>
+  <text x="322" y="93" text-anchor="middle" fill="#a392d0" font-size="8.5">Orch 准入 · Lint</text>
+
+  <line x1="405" y1="81" x2="445" y2="81" stroke="#b392f0" stroke-width="1.5" marker-end="url(#ao)"/>
+
+  <rect x="450" y="55" width="145" height="52" rx="8" fill="#0d2740" stroke="#2a5580" stroke-width="1.2" filter="url(#sh)"/>
+  <text x="522" y="75" text-anchor="middle" fill="#fff" font-size="11" font-weight="bold">worker_modify</text>
+  <text x="522" y="93" text-anchor="middle" fill="#7aaad4" font-size="8.5">Worker 改码</text>
+
+  <line x1="595" y1="81" x2="635" y2="81" stroke="#5eaaff" stroke-width="1.5" marker-end="url(#aw)"/>
+
+  <rect x="640" y="55" width="145" height="52" rx="8" fill="#0d2a0a" stroke="#1a5530" stroke-width="1.2" filter="url(#sh)"/>
+  <text x="712" y="75" text-anchor="middle" fill="#fff" font-size="11" font-weight="bold">reviewer_check</text>
+  <text x="712" y="93" text-anchor="middle" fill="#6aaa6a" font-size="8.5">Reviewer 审查</text>
+
+  <line x1="785" y1="81" x2="825" y2="81" stroke="#56d364" stroke-width="1.5" marker-end="url(#ar)"/>
+
+  <rect x="830" y="55" width="165" height="52" rx="8" fill="#1f1240" stroke="#4a2a7a" stroke-width="1.2" filter="url(#sh)"/>
+  <text x="912" y="75" text-anchor="middle" fill="#fff" font-size="11" font-weight="bold">orchestrator_arbiter</text>
+  <text x="912" y="93" text-anchor="middle" fill="#a392d0" font-size="8.5">Orch 仲裁</text>
+
+  <!-- Branch 1: verified -->
+  <line x1="912" y1="107" x2="912" y2="155" stroke="#e3b341" stroke-width="1.5" marker-end="url(#ay)"/>
+
+  <rect x="840" y="160" width="145" height="42" rx="8" fill="#1a1a0a" stroke="#3a3a1a" stroke-width="1.2" filter="url(#sh)"/>
+  <text x="912" y="180" text-anchor="middle" fill="#e3b341" font-size="11" font-weight="bold">verified</text>
+  <text x="912" y="196" text-anchor="middle" fill="#8a8a4a" font-size="8">Worker 释锁</text>
+
+  <line x1="912" y1="202" x2="912" y2="235" stroke="#e3b341" stroke-width="1.5" marker-end="url(#ay)"/>
+
+  <rect x="855" y="240" width="115" height="32" rx="8" fill="#0a1f0f" stroke="#1a5530" stroke-width="1.2"/>
+  <text x="912" y="260" text-anchor="middle" fill="#56d364" font-size="10" font-weight="bold">lock_released ◀终态</text>
+
+  <!-- Branch 2: correction loop -->
+  <line x1="830" y1="81" x2="795" y2="140" stroke="#f7787b" stroke-width="1.2" marker-end="url(#ax)" stroke-dasharray="5,3"/>
+  <text x="790" y="130" text-anchor="end" fill="#f7787b" font-size="7.5">review_round &lt; 4</text>
+
+  <!-- rejected side exit -->
+  <line x1="322" y1="107" x2="322" y2="235" stroke="#f7787b" stroke-width="1.2" marker-end="url(#ax)"/>
+  <rect x="267" y="240" width="110" height="32" rx="8" fill="#1a0a0f" stroke="#552020" stroke-width="1.2"/>
+  <text x="322" y="260" text-anchor="middle" fill="#f7787b" font-size="10" font-weight="bold">rejected ◀终态</text>
+
+  <!-- Round counter annotation -->
+  <rect x="490" y="140" width="170" height="40" rx="6" fill="#1a1200" stroke="#3a2800" stroke-width="0.8"/>
+  <text x="575" y="157" text-anchor="middle" fill="#e3b341" font-size="9" font-weight="bold">↺ 修正回路</text>
+  <text x="575" y="173" text-anchor="middle" fill="#8a6a2a" font-size="7.5">review_round += 1 · 4 轮上限</text>
+
+  <!-- Role tags -->
+  <rect x="40" y="130" width="80" height="18" rx="4" fill="#0d2740" stroke="#2a5580" stroke-width="0.5"/>
+  <text x="80" y="143" text-anchor="middle" fill="#5eaaff" font-size="7">Worker</text>
+
+  <rect x="240" y="130" width="85" height="18" rx="4" fill="#1f1240" stroke="#4a2a7a" stroke-width="0.5"/>
+  <text x="282" y="143" text-anchor="middle" fill="#b392f0" font-size="7">Orchestrator</text>
+
+  <rect x="640" y="130" width="80" height="18" rx="4" fill="#0d2a0a" stroke="#1a5530" stroke-width="0.5"/>
+  <text x="680" y="143" text-anchor="middle" fill="#56d364" font-size="7">Reviewer</text>
+</svg>
+</div>
+
+<!-- ====== 四层安全 ====== -->
+<h2>四重安全校验</h2>
+<div class="safety">
+  <div class="sf-card s1">
+    <h4>① CAS 乐观锁</h4>
+    <p>每次推进先读取 revision，UPDATE 带 <code>WHERE revision=?</code>。rowcount=0 即为并发冲突 → RuntimeError → 重试。纯 SQLite 原子操作，无需 Redis。</p>
+  </div>
+  <div class="sf-card s2">
+    <h4>② SQL Trigger 兜底</h4>
+    <p>BEFORE UPDATE 触发：revision 必须 +1，转移路径必须匹配硬编码白名单。即使绕过 Python 裸写 SQL 也无法破坏。</p>
+  </div>
+  <div class="sf-card s3">
+    <h4>③ 权限矩阵</h4>
+    <p>Worker 不能推 Orch stage，Reviewer 只能推自己 stage。ROLE_PERMISSIONS 在 Python 层拦截，PermissionError 直接拒绝。</p>
+  </div>
+  <div class="sf-card s4">
+    <h4>④ 字段白名单</h4>
+    <p>ALLOWED_COLUMNS 静默过滤非法列名。写出非白名单字段 → 不写入，不会报错也不会泄露。</p>
+  </div>
+</div>
+
+<!-- ====== 架构对比 ====== -->
+<h2>角色三角</h2>
+<table>
+  <tr><th>角色</th><th>权限 (from_stage)</th><th>写入</th><th>读取</th></tr>
+  <tr>
+    <td><span style="color:var(--w);font-weight:600;">Worker</span></td>
+    <td><code>init</code> · <code>worker_modify</code> · <code>verified</code></td>
+    <td>reason_json · plan_json · plan_rN · commits_json</td>
+    <td>feedback_rN · human_intervention.decision</td>
+  </tr>
+  <tr>
+    <td><span style="color:var(--o);font-weight:600;">Orchestrator</span></td>
+    <td><code>init</code> · <code>orchestrator_gate</code> · <code>orchestrator_arbiter</code> · <code>verified</code> · <code>worker_modify</code></td>
+    <td>approval_status · feedback_rN · human_intervention · review_round</td>
+    <td>reason_json · completion_rN</td>
+  </tr>
+  <tr>
+    <td><span style="color:var(--r);font-weight:600;">Reviewer</span></td>
+    <td><code>reviewer_check</code></td>
+    <td>completion_rN · project 文件索引地址</td>
+    <td>plan_rN · git diff (lint_full crossref)</td>
+  </tr>
+</table>
+
+<!-- ====== 关键数字 ====== -->
+<h2>逐行可审计</h2>
+<div class="num-row">
+  <div class="num-card"><div class="n" style="color:var(--w)">5</div><div class="l">Python 源文件</div></div>
+  <div class="num-card"><div class="n" style="color:var(--o)">~650</div><div class="l">行核心代码</div></div>
+  <div class="num-card"><div class="n" style="color:var(--r)">4</div><div class="l">SQLite 表</div></div>
+  <div class="num-card"><div class="n" style="color:var(--y)">90</div><div class="l">单元测试</div></div>
+  <div class="num-card"><div class="n" style="color:var(--w)">0</div><div class="l">外部依赖</div></div>
+</div>
+
+<table>
+  <tr><th>模块</th><th>行数</th><th>职责</th></tr>
+  <tr><td><code>pipeline.py</code></td><td>~140</td><td>状态机核心 · transition_stage · CAS · 权限</td></tr>
+  <tr><td><code>orchestrator.py</code></td><td>~430</td><td>数据库 · CRUD · 心跳 · 孤儿锁</td></tr>
+  <tr><td><code>lint_core.py</code></td><td>~55</td><td>越界 glob 匹配 · 共用</td></tr>
+  <tr><td><code>lint_gate.py</code></td><td>~55</td><td>plan 结构校验 · orchestrator_gate 用</td></tr>
+  <tr><td><code>lint_full.py</code></td><td>~200</td><td>AST hints · 冲突检测 · 交叉验证 · reviewer_check 用</td></tr>
+</table>
+
+<h2>全链路审查闭环</h2>
+
+<table>
+  <tr><th>阶段</th><th>谁</th><th>检查内容</th><th>消费方</th></tr>
+  <tr><td>plan 结构校验</td><td>lint_gate</td><td>JSON 合法性 · files 非空 · 无路径遍历</td><td>→ Orch gate 拒绝不合法 plan</td></tr>
+  <tr><td>越界检查</td><td>lint_core</td><td>glob 匹配 can_touch / forbidden</td><td>→ Orch gate 拒绝越界 · Reviewer 交叉验证</td></tr>
+  <tr><td>文件冲突</td><td>lint_full</td><td>git diff 交集 · 最近 commit 冲突</td><td>→ Reviewer 写 completion_rN</td></tr>
+  <tr><td>AST 符号变更</td><td>lint_full</td><td>新增/删除函数 · 签名变化 · 新类</td><td>→ Reviewer 写 completion_rN</td></tr>
+  <tr><td>三方交叉验证</td><td>lint_crossref</td><td>plan 声明 vs git diff vs AST hints</td><td>→ Reviewer 写结构化差异报告</td></tr>
+</table>
+
+<p style="text-align:center;color:var(--muted);margin:2rem 0 1rem;font-size:0.8rem;">
+  Orchestration Protocol · zero-dependency · 90 tests · MIT License
+</p>
+
+</div>
+</body>
+</html>

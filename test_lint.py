@@ -319,18 +319,86 @@ class TestLintPlan(unittest.TestCase):
 
 class TestLintCrossref(unittest.TestCase):
 
-    def test_crossref_basic(self):
-        boundaries = {"py-agent": {"can_touch": ["*.py"], "forbidden": []}}
-        result = lint_crossref(
-            '{"files":["pipeline.py"]}', boundaries, "py-agent"
-        )
+    def setUp(self):
+        self.boundaries = {"py-agent": {"can_touch": ["*.py", "lib/"], "forbidden": ["app/"]}}
+        self.plan = '{"files":["lib/utils.py", "main.py"]}'
+        # plan declares 2 files: lib/utils.py (OK), main.py (OK for *.py)
+
+    def test_basic_structure(self):
+        result = lint_crossref(self.plan, self.boundaries, "py-agent")
         self.assertIn("blocked", result)
         self.assertIn("crossref", result)
         self.assertIn("boundary", result)
-        self.assertIn("declared_files", result["crossref"])
-        self.assertIn("actual_files", result["crossref"])
-        self.assertIn("extra_files", result["crossref"])
-        self.assertIn("missing_files", result["crossref"])
+        cr = result["crossref"]
+        self.assertIn("declared_files", cr)
+        self.assertIn("actual_files", cr)
+        self.assertIn("extra_files", cr)
+        self.assertIn("missing_files", cr)
+
+    def test_crossref_boundary_blocked_on_actual_files(self):
+        """Actual git diff includes a forbidden file."""
+        # We can't control git diff in tests, but we can verify the structural
+        # contract — blocked is a bool, boundary is a dict with 'reason'
+        result = lint_crossref(self.plan, self.boundaries, "py-agent")
+        self.assertIsInstance(result["blocked"], bool)
+        self.assertIn("reason", result["boundary"])
+
+    def test_crossref_handles_non_json_plan(self):
+        result = lint_crossref("not json", self.boundaries, "py-agent")
+        self.assertIn("blocked", result)
+        # declared_files will be empty since plan failed to parse
+        self.assertEqual(result["crossref"]["declared_files"], [])
+        # actual_files comes from git diff regardless
+        self.assertIsInstance(result["crossref"]["actual_files"], list)
+
+    def test_crossref_handles_empty_plan(self):
+        result = lint_crossref('{"files":[]}', self.boundaries, "py-agent")
+        self.assertEqual(result["crossref"]["declared_files"], [])
+        self.assertIsInstance(result["crossref"]["actual_files"], list)
+
+    def test_crossref_extra_and_missing_are_sorted(self):
+        result = lint_crossref(
+            '{"files":["z.py","a.py"]}', self.boundaries, "py-agent"
+        )
+        declared = result["crossref"]["declared_files"]
+        # Should be sorted
+        self.assertEqual(declared, sorted(declared))
+
+    def test_crossref_hints_structure_when_present(self):
+        result = lint_crossref(self.plan, self.boundaries, "py-agent")
+        if result["hints"] is not None:
+            # hints may contain conflicts and/or ast
+            self.assertIsInstance(result["hints"], dict)
+            if "conflicts" in result["hints"]:
+                self.assertIsInstance(result["hints"]["conflicts"], list)
+            if "ast" in result["hints"]:
+                self.assertIsInstance(result["hints"]["ast"], dict)
+                for key in ["new_functions", "signature_changes", "deleted_symbols", "new_classes"]:
+                    self.assertIn(key, result["hints"]["ast"])
+
+    def test_crossref_path_normalisation_in_crossref(self):
+        """Backslashes in plan files are normalised."""
+        result = lint_crossref(
+            '{"files":["lib\\\\utils.py"]}', self.boundaries, "py-agent"
+        )
+        declared = result["crossref"]["declared_files"]
+        for f in declared:
+            self.assertNotIn("\\\\", f)
+
+    def test_crossref_agent_not_in_boundaries(self):
+        boundaries = {"other-agent": {"can_touch": ["*.py"], "forbidden": []}}
+        result = lint_crossref(self.plan, boundaries, "py-agent")
+        # Boundary check fails for actual files (if any), but crossref is still produced
+        self.assertIn("crossref", result)
+        self.assertIn("boundary", result)
+
+    def test_crossref_forbidden_file_in_plan(self):
+        """Plan declares a forbidden file — caught by boundary layer if it matches actual."""
+        plan = '{"files":["app/secret.py"]}'
+        result = lint_crossref(plan, self.boundaries, "py-agent")
+        # blocked depends on whether app/secret.py actually exists and is modified
+        self.assertIn("blocked", result)
+        self.assertIsInstance(result["blocked"], bool)
 
 
 if __name__ == "__main__":

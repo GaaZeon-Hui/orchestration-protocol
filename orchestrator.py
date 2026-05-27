@@ -299,7 +299,7 @@ class Orchestrator:
         rows = conn.execute("""
             SELECT request_id, agent, revision
             FROM pipeline_state
-            WHERE stage = 'completed'
+            WHERE stage = 'verified'
               AND updated_at < datetime('now','localtime','-%d seconds')
         """ % timeout_seconds).fetchall()
         conn.close()
@@ -319,12 +319,10 @@ class Orchestrator:
 
     # ── Pipeline operations ──────────────────────────────────
 
-    def init_pipeline(self, agent, reason, scope, plan, self_review, constraints,
-                      tz=None):
+    def init_pipeline(self, agent, reason, plan, tz=None):
         """Create a new pipeline row. Returns request_id.
 
-        *scope*, *plan*, *self_review*, and *constraints* are Python
-        dicts/lists — serialised to JSON internally.
+        *reason* and *plan* are Python dicts — serialised to JSON internally.
 
         Raises RuntimeError if *agent* already has an active
         (non-terminal) pipeline.
@@ -348,15 +346,12 @@ class Orchestrator:
         conn = self._connect()
         conn.execute("""
             INSERT INTO pipeline_state
-                (request_id, agent, stage, reason,
-                 scope_json, plan_json, self_review_json, constraints_json)
-            VALUES (?, ?, 'request_submitted', ?, ?, ?, ?, ?)
+                (request_id, agent, stage, reason_json, plan_json)
+            VALUES (?, ?, 'init', ?, ?)
         """, (
-            req_id, agent, reason,
-            json.dumps(scope, ensure_ascii=False),
+            req_id, agent,
+            json.dumps(reason, ensure_ascii=False),
             json.dumps(plan, ensure_ascii=False),
-            json.dumps(self_review, ensure_ascii=False),
-            json.dumps(constraints, ensure_ascii=False),
         ))
         conn.commit()
         conn.close()
@@ -381,9 +376,12 @@ class Orchestrator:
 
         result = dict(zip(cols, row))
         for key in (
-            'scope_json', 'plan_json', 'self_review_json', 'constraints_json',
-            'granted_scope_json', 'commits_json', 'context_updates_json',
-            'conflict_analysis_json', 'boundary_analysis_json', 'logic_analysis_json',
+            'reason_json', 'plan_json',
+            'plan_r2', 'plan_r3', 'plan_r4',
+            'commits_json',
+            'feedback_r1', 'feedback_r2', 'feedback_r3', 'feedback_r4',
+            'completion_r1', 'completion_r2', 'completion_r3', 'completion_r4',
+            'human_intervention',
         ):
             if result.get(key):
                 try:

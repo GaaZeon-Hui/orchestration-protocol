@@ -163,7 +163,26 @@ class Orchestrator:
                 schema_json TEXT
             )
         """)
-        # audit_log table (added post pipeline.py extraction)
+        # New pipeline columns (round-based + human intervention)
+        new_pipeline_cols = [
+            'reason_json', 'plan_json',
+            'plan_r2', 'plan_r3', 'plan_r4',
+            'commits_json',
+            'approval_status', 'rejection_reason',
+            'feedback_r1', 'feedback_r2', 'feedback_r3', 'feedback_r4',
+            'completion_r1', 'completion_r2', 'completion_r3', 'completion_r4',
+            'human_intervention',
+            'review_round',
+        ]
+        for col in new_pipeline_cols:
+            try:
+                conn.execute(
+                    "ALTER TABLE pipeline_state ADD COLUMN {} TEXT".format(col)
+                )
+            except sqlite3.OperationalError as e:
+                if "duplicate column name" not in str(e).lower():
+                    raise
+        # audit_log table
         conn.execute("""
             CREATE TABLE IF NOT EXISTS audit_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -56,17 +56,14 @@ class Orchestrator:
             CREATE TABLE IF NOT EXISTS pipeline_state (
                 request_id TEXT PRIMARY KEY,
                 agent TEXT NOT NULL,
-                stage TEXT NOT NULL DEFAULT 'request_submitted' CHECK(stage IN (
-                    'request_submitted',
-                    'conflict_analysis_done',
-                    'boundary_analysis_done',
-                    'logic_analysis_done',
-                    'approved',
+                stage TEXT NOT NULL DEFAULT 'init' CHECK(stage IN (
+                    'init',
+                    'orchestrator_gate',
+                    'worker_modify',
+                    'reviewer_check',
+                    'orchestrator_arbiter',
+                    'verified',
                     'rejected',
-                    'modifying',
-                    'self_review_done',
-                    'completion_submitted',
-                    'completed',
                     'lock_released'
                 )),
                 revision INTEGER NOT NULL DEFAULT 0,
@@ -133,15 +130,12 @@ class Orchestrator:
                 END;
 
                 SELECT CASE
-                    WHEN (OLD.stage='request_submitted' AND NEW.stage IN ('conflict_analysis_done','rejected'))
-                      OR (OLD.stage='conflict_analysis_done' AND NEW.stage='boundary_analysis_done')
-                      OR (OLD.stage='boundary_analysis_done' AND NEW.stage='logic_analysis_done')
-                      OR (OLD.stage='logic_analysis_done' AND NEW.stage IN ('approved','rejected'))
-                      OR (OLD.stage='approved' AND NEW.stage='modifying')
-                      OR (OLD.stage='modifying' AND NEW.stage='self_review_done')
-                      OR (OLD.stage='self_review_done' AND NEW.stage='completion_submitted')
-                      OR (OLD.stage='completion_submitted' AND NEW.stage='completed')
-                      OR (OLD.stage='completed' AND NEW.stage='lock_released')
+                    WHEN (OLD.stage='init' AND NEW.stage='orchestrator_gate')
+                      OR (OLD.stage='orchestrator_gate' AND NEW.stage IN ('worker_modify','rejected'))
+                      OR (OLD.stage='worker_modify' AND NEW.stage='reviewer_check')
+                      OR (OLD.stage='reviewer_check' AND NEW.stage='orchestrator_arbiter')
+                      OR (OLD.stage='orchestrator_arbiter' AND NEW.stage IN ('verified','worker_modify'))
+                      OR (OLD.stage='verified' AND NEW.stage='lock_released')
                     THEN NULL
                     ELSE RAISE(ABORT, 'Invalid transition: ' || OLD.stage || ' -> ' || NEW.stage)
                 END;

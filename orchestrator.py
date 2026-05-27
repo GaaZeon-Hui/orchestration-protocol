@@ -89,22 +89,20 @@ class Orchestrator:
             CREATE INDEX IF NOT EXISTS idx_pipeline_stage ON pipeline_state(stage);
             CREATE INDEX IF NOT EXISTS idx_pipeline_agent ON pipeline_state(agent);
 
-            CREATE TABLE IF NOT EXISTS context (
-                id INTEGER PRIMARY KEY CHECK(id=1),
-                last_commit TEXT,
-                agent_history_json TEXT DEFAULT '[]',
-                warnings_json TEXT DEFAULT '[]',
-                boundaries_json TEXT,
-                pipeline TEXT,
-                api_contract TEXT,
-                meta_fields TEXT,
-                orchestrator_id TEXT,
-                orchestrator_heartbeat TEXT,
-                orchestrator_started_at TEXT,
-                orchestrator_current_task TEXT,
-                updated_at TEXT DEFAULT (datetime('now','localtime'))
+            CREATE TABLE IF NOT EXISTS project (
+                id TEXT PRIMARY KEY,
+                content TEXT,
+                file_index TEXT,
+                change_time TEXT,
+                file_use TEXT,
+                agent_status TEXT
             );
-            INSERT OR IGNORE INTO context (id) VALUES (1);
+
+            CREATE TABLE IF NOT EXISTS register (
+                agent_id TEXT PRIMARY KEY,
+                role TEXT NOT NULL,
+                schema_json TEXT
+            );
 
             CREATE TABLE IF NOT EXISTS audit_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -147,21 +145,24 @@ class Orchestrator:
     def migrate(self):
         """Add missing columns and tables from older versions."""
         conn = self._connect()
-        for col in ["orchestrator_id", "orchestrator_heartbeat",
-                     "orchestrator_started_at", "orchestrator_current_task",
-                     "boundaries_json"]:
-            try:
-                conn.execute("ALTER TABLE context ADD COLUMN {} TEXT".format(col))
-            except sqlite3.OperationalError as e:
-                if "duplicate column name" not in str(e).lower():
-                    raise
-        for col in ["conflict_analysis_json", "boundary_analysis_json",
-                     "logic_analysis_json"]:
-            try:
-                conn.execute("ALTER TABLE pipeline_state ADD COLUMN {} TEXT".format(col))
-            except sqlite3.OperationalError as e:
-                if "duplicate column name" not in str(e).lower():
-                    raise
+        # project and register tables (new in 3-role architecture)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS project (
+                id TEXT PRIMARY KEY,
+                content TEXT,
+                file_index TEXT,
+                change_time TEXT,
+                file_use TEXT,
+                agent_status TEXT
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS register (
+                agent_id TEXT PRIMARY KEY,
+                role TEXT NOT NULL,
+                schema_json TEXT
+            )
+        """)
         # audit_log table (added post pipeline.py extraction)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS audit_log (
@@ -185,133 +186,87 @@ class Orchestrator:
         conn.commit()
         conn.close()
 
-    # ── Role registration (uses context singleton) ───────────
+    # ── Role registration (uses register table) ─────────────
 
-    def check_orchestrator_alive(self):
-        """Return (is_alive: bool, orchestrator_id: str|None)."""
-        conn = self._connect()
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT orchestrator_id, orchestrator_heartbeat FROM context WHERE id=1"
-        )
-        row = cur.fetchone()
-        conn.close()
-
-        if not row or not row[1]:
-            return False, None
-
-        heartbeat = row[1]
-        conn2 = self._connect()
-        cur2 = conn2.cursor()
-        cur2.execute(
-            "SELECT datetime(?) < datetime('now','localtime','-90 seconds')",
-            (heartbeat,),
-        )
-        expired = bool(cur2.fetchone()[0])
-        conn2.close()
-        return (not expired), row[0]
-
-    def try_register(self, session_id=None):
-        """Attempt to register as orchestrator. Returns 'orchestrator' or 'worker'."""
-        if session_id is None:
-            session_id = str(uuid.uuid4())[:8]
-
-        alive, _ = self.check_orchestrator_alive()
-        if alive:
-            return "worker"
+    def try_register(self, agent_id=None):
+        """Consult register table for role. Returns 'orchestrator', 'worker', or 'reviewer'."""
+        if agent_id is None:
+            agent_id = str(uuid.uuid4())[:8]
 
         conn = self._connect()
-        cur = conn.cursor()
-        cur.execute("""
-            UPDATE context SET
-                orchestrator_id = ?,
-                orchestrator_heartbeat = datetime('now','localtime'),
-                orchestrator_started_at = datetime('now','localtime')
-            WHERE id = 1
-              AND (orchestrator_heartbeat IS NULL
-                   OR datetime(orchestrator_heartbeat) < datetime('now','localtime','-90 seconds'))
-        """, (session_id,))
-        conn.commit()
-        role = "orchestrator" if cur.rowcount == 1 else "worker"
+        row = conn.execute(
+            "SELECT role FROM register WHERE agent_id=?",
+            (agent_id,)
+        ).fetchone()
         conn.close()
-        return role
 
-    def send_heartbeat(self, orchestrator_id):
-        """Update heartbeat in context. Returns True if still registered."""
-        conn = self._connect()
-        cur = conn.cursor()
-        cur.execute("""
-            UPDATE context SET orchestrator_heartbeat = datetime('now','localtime')
-            WHERE id = 1 AND orchestrator_id = ?
-        """, (orchestrator_id,))
-        conn.commit()
-        ok = cur.rowcount == 1
-        conn.close()
-        return ok
+        if row:
+            return row[0]
+        return "worker"
 
     def check_and_heartbeat(self, orchestrator_id):
-        """One-shot check for new pipeline events + heartbeat refresh.
+        """Scan for new pipeline events.
 
-        Replaces ``run_monitor()`` for Claude Code agent workflows that
-        cannot run a persistent blocking loop.  Call this once per
-        invocation (e.g. via ``/loop``) and act on the returned items.
+        In the new architecture, heartbeat is managed via pipeline stage
+        scanning. Orch checks for init-stage requests and arbiter-stage items.
 
         Returns:
             {"status": "ok", "items": [...]}
-            {"status": "takeover", "items": []}
         """
-        if not self.send_heartbeat(orchestrator_id):
-            return {"status": "takeover", "items": []}
-
         items = []
-        for r in self.get_requests_by_stage("request_submitted"):
+        for r in self.get_requests_by_stage("init"):
             items.append({
                 "type": "new_request",
                 "request_id": r["request_id"],
                 "agent": r["agent"],
             })
-        for c in self.get_requests_by_stage("completion_submitted"):
+        for c in self.get_requests_by_stage("orchestrator_arbiter"):
             items.append({
-                "type": "new_completion",
+                "type": "awaiting_arbitration",
                 "request_id": c["request_id"],
                 "agent": c["agent"],
             })
         return {"status": "ok", "items": items}
 
-    def set_current_task(self, request_id, task_type):
-        """Record what the orchestrator is currently working on.
-        Cleared by clear_current_task() when done.
-        """
+    # ── Project table operations ──────────────────────────
+
+    def create_project(self, project_id, content):
         conn = self._connect()
         conn.execute(
-            "UPDATE context SET orchestrator_current_task = ? WHERE id = 1",
-            (json.dumps({"request_id": request_id, "type": task_type,
-                         "started_at": datetime.now(timezone.utc).isoformat()}),),
+            "INSERT INTO project (id, content) VALUES (?, ?)",
+            (project_id, content)
         )
         conn.commit()
         conn.close()
 
-    def clear_current_task(self):
-        """Clear the current task record. Call when work is complete."""
-        conn = self._connect()
-        conn.execute(
-            "UPDATE context SET orchestrator_current_task = NULL WHERE id = 1"
-        )
-        conn.commit()
-        conn.close()
-
-    def get_current_task(self):
-        """Return the last unfinished task dict, or None."""
+    def get_project(self, project_id):
         conn = self._connect()
         row = conn.execute(
-            "SELECT orchestrator_current_task FROM context WHERE id = 1"
+            "SELECT * FROM project WHERE id=?", (project_id,)
         ).fetchone()
         conn.close()
-        if row and row[0]:
-            try:
-                return json.loads(row[0])
-            except (json.JSONDecodeError, TypeError):
-                pass
+        if row:
+            cols = ['id', 'content', 'file_index', 'change_time', 'file_use', 'agent_status']
+            return dict(zip(cols, row))
+        return None
+
+    # ── Register table operations ──────────────────────────
+
+    def get_register(self, agent_id):
+        conn = self._connect()
+        row = conn.execute(
+            "SELECT * FROM register WHERE agent_id=?", (agent_id,)
+        ).fetchone()
+        conn.close()
+        if row:
+            cols = ['agent_id', 'role', 'schema_json']
+            result = dict(zip(cols, row))
+            if result.get('schema_json'):
+                try:
+                    result['schema_json'] = json.loads(result['schema_json'])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            return result
         return None
 
     def resolve_orphan_locks(self, timeout_seconds=120):
@@ -459,51 +414,6 @@ class Orchestrator:
         if row:
             return row[0], row[1]
         return None, None
-
-    # ── Context & boundaries ─────────────────────────────────
-
-    def get_boundaries(self):
-        conn = self._connect()
-        cur = conn.cursor()
-        cur.execute("SELECT boundaries_json FROM context WHERE id=1")
-        row = cur.fetchone()
-        conn.close()
-        if row and row[0]:
-            return json.loads(row[0])
-        return None
-
-    def set_boundaries(self, boundaries):
-        conn = self._connect()
-        conn.execute(
-            "UPDATE context SET boundaries_json=?, "
-            "updated_at=datetime('now','localtime') WHERE id=1",
-            (json.dumps(boundaries, ensure_ascii=False),),
-        )
-        conn.commit()
-        conn.close()
-
-    def update_context(self, last_commit=None, agent_history=None, warnings=None):
-        conn = self._connect()
-        cur = conn.cursor()
-        parts = []
-        params = []
-        if last_commit is not None:
-            parts.append("last_commit=?")
-            params.append(last_commit)
-        if agent_history is not None:
-            parts.append("agent_history_json=?")
-            params.append(json.dumps(agent_history, ensure_ascii=False))
-        if warnings is not None:
-            parts.append("warnings_json=?")
-            params.append(json.dumps(warnings, ensure_ascii=False))
-        if parts:
-            parts.append("updated_at=datetime('now','localtime')")
-            cur.execute(
-                "UPDATE context SET {} WHERE id=1".format(','.join(parts)),
-                params,
-            )
-            conn.commit()
-        conn.close()
 
     # ── Utilities ─────────────────────────────────────────────
 

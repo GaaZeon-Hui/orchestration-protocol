@@ -20,7 +20,7 @@ VALID_TRANSITIONS = {
 # role -> set of from_stage values this role is allowed to advance
 ROLE_PERMISSIONS = {
     'worker':        {'init', 'worker_modify', 'verified'},
-    'orchestrator':  {'orchestrator_gate', 'orchestrator_arbiter', 'verified', 'worker_modify'},
+    'orchestrator':  {'init', 'orchestrator_gate', 'orchestrator_arbiter', 'verified', 'worker_modify'},
     'reviewer':      {'reviewer_check'},
 }
 

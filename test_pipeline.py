@@ -48,10 +48,10 @@ class TestTransitionStage(unittest.TestCase):
 
     def _init(self):
         return self.orc.init_pipeline(
-            "py-agent", "test",
-            {"files": ["x.py"], "modules": [], "excluded": []},
-            {"summary": "x", "steps": [], "breaking_changes": False},
-            {"potential_issues": []}, [], self.tz,
+            "py-agent",
+            {"reason": "test", "agent_id": "py-agent"},
+            {"files": ["x.py"]},
+            self.tz,
         )
 
     # ── 1. normal transition ─────────────────────────────────
@@ -60,13 +60,13 @@ class TestTransitionStage(unittest.TestCase):
         req_id = self._init()
         p = self.orc.get_pipeline(req_id)
         new_rev, new_stage = transition_stage(
-            req_id, "conflict_analysis_done", "orchestrator",
+            req_id, "orchestrator_gate", "orchestrator",
             p["revision"], self.orc.db_path,
         )
-        self.assertEqual(new_stage, "conflict_analysis_done")
+        self.assertEqual(new_stage, "orchestrator_gate")
         self.assertEqual(new_rev, 1)
         p = self.orc.get_pipeline(req_id)
-        self.assertEqual(p["stage"], "conflict_analysis_done")
+        self.assertEqual(p["stage"], "orchestrator_gate")
         self.assertEqual(p["revision"], 1)
 
     # ── 2. role permission ───────────────────────────────────
@@ -74,38 +74,38 @@ class TestTransitionStage(unittest.TestCase):
     def test_worker_blocked_from_orchestrator_stage(self):
         req_id = self._init()
         p = self.orc.get_pipeline(req_id)
-        with self.assertRaises(PermissionError):
-            transition_stage(
-                req_id, "conflict_analysis_done", "worker",
-                p["revision"], self.orc.db_path,
-            )
-
-    def test_orchestrator_blocked_from_worker_stage(self):
-        req_id = self._init()
-        p = self.orc.get_pipeline(req_id)
-        # Advance to approved (orchestrator does this)
         rev, _ = transition_stage(
-            req_id, "conflict_analysis_done", "orchestrator",
+            req_id, "orchestrator_gate", "orchestrator",
             p["revision"], self.orc.db_path,
         )
         rev, _ = transition_stage(
-            req_id, "boundary_analysis_done", "orchestrator",
-            rev, self.orc.db_path,
+            req_id, "worker_modify", "orchestrator",
+            rev, self.orc.db_path, approval_status="approved",
         )
         rev, _ = transition_stage(
-            req_id, "logic_analysis_done", "orchestrator",
-            rev, self.orc.db_path,
+            req_id, "reviewer_check", "worker",
+            rev, self.orc.db_path, commits_json=json.dumps(["abc"]),
         )
         rev, _ = transition_stage(
-            req_id, "approved", "orchestrator",
-            rev, self.orc.db_path,
-            approval_status="approved",
-            granted_scope_json=json.dumps({"files": ["x.py"]}),
+            req_id, "orchestrator_arbiter", "reviewer",
+            rev, self.orc.db_path, completion_r1=json.dumps({"verdict": "符合计划"}),
         )
-        # Now try orchestrator to advance from "approved" (worker-only stage)
         with self.assertRaises(PermissionError):
             transition_stage(
-                req_id, "modifying", "orchestrator",
+                req_id, "verified", "worker",
+                rev, self.orc.db_path,
+            )
+
+    def test_reviewer_blocked_from_orchestrator_gate_push(self):
+        req_id = self._init()
+        p = self.orc.get_pipeline(req_id)
+        rev, _ = transition_stage(
+            req_id, "orchestrator_gate", "orchestrator",
+            p["revision"], self.orc.db_path,
+        )
+        with self.assertRaises(PermissionError):
+            transition_stage(
+                req_id, "worker_modify", "reviewer",
                 rev, self.orc.db_path,
             )
 
@@ -116,7 +116,7 @@ class TestTransitionStage(unittest.TestCase):
         p = self.orc.get_pipeline(req_id)
         with self.assertRaises(RuntimeError):
             transition_stage(
-                req_id, "conflict_analysis_done", "orchestrator",
+                req_id, "orchestrator_gate", "orchestrator",
                 99,  # wrong revision
                 self.orc.db_path,
             )
@@ -128,22 +128,21 @@ class TestTransitionStage(unittest.TestCase):
         req_id = self._init()
         p = self.orc.get_pipeline(req_id)
         rev, _ = transition_stage(
-            req_id, "conflict_analysis_done", "orchestrator",
+            req_id, "orchestrator_gate", "orchestrator",
             p["revision"], self.orc.db_path,
-            reason="updated_reason",
+            approval_status="testing",
         )
         p = self.orc.get_pipeline(req_id)
-        self.assertEqual(p["reason"], "updated_reason")
+        self.assertEqual(p["approval_status"], "testing")
 
     def test_kwargs_filtered_unknown(self):
         req_id = self._init()
         p = self.orc.get_pipeline(req_id)
         rev, _ = transition_stage(
-            req_id, "conflict_analysis_done", "orchestrator",
+            req_id, "orchestrator_gate", "orchestrator",
             p["revision"], self.orc.db_path,
             not_a_real_column="SHOULD_NOT_APPEAR",
         )
-        # Check audit_log — payload_json should NOT contain the unknown column
         conn = self.orc._connect()
         row = conn.execute(
             "SELECT payload_json FROM audit_log WHERE request_id=? ORDER BY id DESC LIMIT 1",
@@ -160,7 +159,7 @@ class TestTransitionStage(unittest.TestCase):
         req_id = self._init()
         p = self.orc.get_pipeline(req_id)
         rev, stage = transition_stage(
-            req_id, "conflict_analysis_done", "orchestrator",
+            req_id, "orchestrator_gate", "orchestrator",
             p["revision"], self.orc.db_path,
             approval_status="testing",
         )
@@ -172,29 +171,25 @@ class TestTransitionStage(unittest.TestCase):
         ).fetchone()
         conn.close()
         self.assertEqual(row[0], "orchestrator")
-        self.assertEqual(row[1], "request_submitted")
-        self.assertEqual(row[2], "conflict_analysis_done")
+        self.assertEqual(row[1], "init")
+        self.assertEqual(row[2], "orchestrator_gate")
         self.assertEqual(row[3], 0)
         self.assertEqual(row[4], 1)
         payload = json.loads(row[5])
         self.assertEqual(payload["approval_status"], "testing")
 
     def test_audit_log_complete_trail(self):
-        """Full pipeline flow produces correct audit trail."""
+        """Full pipeline flow produces correct audit trail (new 7-stage path)."""
         req_id = self._init()
         p = self.orc.get_pipeline(req_id)
         rev = p["revision"]
 
         flow = [
-            ("conflict_analysis_done", "orchestrator"),
-            ("boundary_analysis_done", "orchestrator"),
-            ("logic_analysis_done", "orchestrator"),
-            ("approved", "orchestrator", {"approval_status": "approved",
-                                           "granted_scope_json": json.dumps({"files": ["x.py"]})}),
-            ("modifying", "worker"),
-            ("self_review_done", "worker", {"self_review_json": json.dumps({"done": True})}),
-            ("completion_submitted", "worker", {"commits_json": json.dumps(["abc"])}),
-            ("completed", "orchestrator"),
+            ("orchestrator_gate", "orchestrator"),
+            ("worker_modify", "orchestrator", {"approval_status": "approved"}),
+            ("reviewer_check", "worker", {"commits_json": json.dumps(["abc"])}),
+            ("orchestrator_arbiter", "reviewer", {"completion_r1": json.dumps({"verdict": "符合计划"})}),
+            ("verified", "orchestrator"),
             ("lock_released", "worker"),
         ]
         for item in flow:
@@ -209,9 +204,8 @@ class TestTransitionStage(unittest.TestCase):
             (req_id,),
         ).fetchall()
         conn.close()
-        self.assertEqual(len(rows), 9)
-        expected_roles = ["orchestrator", "orchestrator", "orchestrator", "orchestrator",
-                          "worker", "worker", "worker", "orchestrator", "worker"]
+        self.assertEqual(len(rows), 6)
+        expected_roles = ["orchestrator", "orchestrator", "worker", "reviewer", "orchestrator", "worker"]
         self.assertEqual([r[0] for r in rows], expected_roles)
 
     # ── 6. CAS concurrency ───────────────────────────────────
@@ -224,7 +218,7 @@ class TestTransitionStage(unittest.TestCase):
         def advance():
             try:
                 transition_stage(
-                    req_id, "conflict_analysis_done", "orchestrator",
+                    req_id, "orchestrator_gate", "orchestrator",
                     p["revision"], self.orc.db_path,
                 )
                 results.append("ok")
@@ -233,10 +227,7 @@ class TestTransitionStage(unittest.TestCase):
 
         t1 = threading.Thread(target=advance)
         t2 = threading.Thread(target=advance)
-        t1.start()
-        t2.start()
-        t1.join()
-        t2.join()
+        t1.start(); t2.start(); t1.join(); t2.join()
 
         self.assertEqual(results.count("ok"), 1)
         self.assertIn("conflict", results)
@@ -267,67 +258,22 @@ class TestTransitionStage(unittest.TestCase):
         for col in ALLOWED_COLUMNS:
             self.assertIn(col, cols, "{} not a real pipeline_state column".format(col))
 
-    def test_self_review_done_requires_self_review_json(self):
-        """modifying → self_review_done must include self_review_json kwarg."""
-        req_id = self.orc.init_pipeline(
-            "py-agent", "r",
-            {"files": ["x.py"], "modules": [], "excluded": []},
-            {"summary": "x", "steps": [], "breaking_changes": False},
-            {"potential_issues": []}, [], self.tz,
-        )
+    def test_round_columns_persist(self):
+        """Round-based columns are writable via transition_stage kwargs."""
+        req_id = self._init()
         p = self.orc.get_pipeline(req_id)
         rev = p["revision"]
+        rev, _ = transition_stage(req_id, "orchestrator_gate", "orchestrator", rev, self.orc.db_path)
+        rev, _ = transition_stage(req_id, "worker_modify", "orchestrator", rev, self.orc.db_path,
+                                   approval_status="approved")
 
-        # Advance to modifying (approval flow)
-        rev, _ = transition_stage(req_id, "conflict_analysis_done", "orchestrator", rev, self.orc.db_path)
-        rev, _ = transition_stage(req_id, "boundary_analysis_done", "orchestrator", rev, self.orc.db_path)
-        rev, _ = transition_stage(req_id, "logic_analysis_done", "orchestrator", rev, self.orc.db_path)
-        rev, _ = transition_stage(
-            req_id, "approved", "orchestrator", rev, self.orc.db_path,
-            approval_status="approved",
-        )
-        rev, _ = transition_stage(req_id, "modifying", "worker", rev, self.orc.db_path)
-
-        # Should fail without self_review_json
-        with self.assertRaises(ValueError) as ctx:
-            transition_stage(req_id, "self_review_done", "worker", rev, self.orc.db_path)
-        self.assertIn("self_review_json is required", str(ctx.exception))
-
-    def test_analysis_columns_persist(self):
-        """Analysis JSON columns are writable via transition_stage kwargs."""
-        req_id = self.orc.init_pipeline(
-            "py-agent", "r",
-            {"files": ["x.py"], "modules": [], "excluded": []},
-            {"summary": "x", "steps": [], "breaking_changes": False},
-            {"potential_issues": []}, [], self.tz,
-        )
-        p = self.orc.get_pipeline(req_id)
-        rev = p["revision"]
-
-        conflict_data = json.dumps({"conflicts": ["a.py"]}, ensure_ascii=False)
-        rev, _ = transition_stage(
-            req_id, "conflict_analysis_done", "orchestrator", rev, self.orc.db_path,
-            conflict_analysis_json=conflict_data,
-        )
+        rev, _ = transition_stage(req_id, "reviewer_check", "worker", rev, self.orc.db_path,
+                                   commits_json=json.dumps(["abc"]),
+                                   plan_r2=json.dumps({"files": ["x.py", "y.py"]}))
 
         p2 = self.orc.get_pipeline(req_id)
-        self.assertEqual(p2["conflict_analysis_json"], {"conflicts": ["a.py"]})
-
-        boundary_data = json.dumps({"warnings": ["edge case in core"]}, ensure_ascii=False)
-        rev, _ = transition_stage(
-            req_id, "boundary_analysis_done", "orchestrator", rev, self.orc.db_path,
-            boundary_analysis_json=boundary_data,
-        )
-
-        logic_data = json.dumps({"new_functions": ["foo"]}, ensure_ascii=False)
-        rev, _ = transition_stage(
-            req_id, "logic_analysis_done", "orchestrator", rev, self.orc.db_path,
-            logic_analysis_json=logic_data,
-        )
-
-        p3 = self.orc.get_pipeline(req_id)
-        self.assertEqual(p3["boundary_analysis_json"], {"warnings": ["edge case in core"]})
-        self.assertEqual(p3["logic_analysis_json"], {"new_functions": ["foo"]})
+        self.assertEqual(p2["commits_json"], ["abc"])
+        self.assertEqual(p2["plan_r2"], {"files": ["x.py", "y.py"]})
 
     # ── 8. new architecture constants ─────────────────────────
 

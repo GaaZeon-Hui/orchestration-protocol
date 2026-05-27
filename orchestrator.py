@@ -346,8 +346,8 @@ class Orchestrator:
         conn = self._connect()
         conn.execute("""
             INSERT INTO pipeline_state
-                (request_id, agent, stage, reason_json, plan_json)
-            VALUES (?, ?, 'init', ?, ?)
+                (request_id, agent, stage, reason_json, plan_json, review_round)
+            VALUES (?, ?, 'init', ?, ?, 1)
         """, (
             req_id, agent,
             json.dumps(reason, ensure_ascii=False),
@@ -375,6 +375,11 @@ class Orchestrator:
         conn.close()
 
         result = dict(zip(cols, row))
+        if result.get('review_round') is not None:
+            try:
+                result['review_round'] = int(result['review_round'])
+            except (ValueError, TypeError):
+                pass
         for key in (
             'reason_json', 'plan_json',
             'plan_r2', 'plan_r3', 'plan_r4',

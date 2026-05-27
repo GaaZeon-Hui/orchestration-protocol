@@ -285,5 +285,52 @@ class TestLintChangedFiles(unittest.TestCase):
         self.assertIn("reason", result)
 
 
+class TestValidatePlan(unittest.TestCase):
+
+    def test_valid(self):
+        from lint import validate_plan
+        ok, result = validate_plan('{"files":["a.py","b.py"]}')
+        self.assertTrue(ok)
+        self.assertEqual(result["files"], ["a.py", "b.py"])
+
+    def test_empty_files(self):
+        from lint import validate_plan
+        ok, reason = validate_plan('{"files":[]}')
+        self.assertFalse(ok)
+        self.assertIn("empty", reason)
+
+    def test_not_json(self):
+        from lint import validate_plan
+        ok, reason = validate_plan('not json')
+        self.assertFalse(ok)
+
+    def test_path_traversal(self):
+        from lint import validate_plan
+        ok, reason = validate_plan('{"files":["../etc/passwd"]}')
+        self.assertFalse(ok)
+
+    def test_non_string_files(self):
+        from lint import validate_plan
+        ok, reason = validate_plan('{"files":[123]}')
+        self.assertFalse(ok)
+
+
+class TestLintPlan(unittest.TestCase):
+
+    def test_boundary_blocked(self):
+        from lint import lint_plan
+        plan = '{"files":["app/main.py"]}'
+        boundaries = {"py-agent": {"can_touch": ["lib/"], "forbidden": ["app/"]}}
+        result = lint_plan(plan, boundaries, "py-agent")
+        self.assertTrue(result["blocked"])
+
+    def test_passes(self):
+        from lint import lint_plan
+        plan = '{"files":["lib/utils.py"]}'
+        boundaries = {"py-agent": {"can_touch": ["lib/"], "forbidden": ["app/"]}}
+        result = lint_plan(plan, boundaries, "py-agent")
+        self.assertFalse(result["blocked"])
+
+
 if __name__ == "__main__":
     unittest.main()

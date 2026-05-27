@@ -9,7 +9,7 @@ description: Orchestrator role. Gate approval, arbitration, human intervention, 
 import json
 from orchestrator import Orchestrator
 from pipeline import transition_stage
-from lint import lint_plan
+from lint_gate import lint_plan
 
 orc = Orchestrator()
 ```

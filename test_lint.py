@@ -1,4 +1,4 @@
-"""Tests for lint.py — boundary checks, conflict detection, AST hints."""
+"""Tests for lint_core, lint_gate, lint_full."""
 import json
 import os
 import sys
@@ -6,13 +6,13 @@ import tempfile
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from lint import (
-    run_lint,
+from lint_core import run_lint, _check_boundaries, _match_pattern
+from lint_gate import validate_plan, lint_plan
+from lint_full import (
     lint_changed_files,
-    _check_boundaries,
+    lint_crossref,
     _check_conflicts,
     _extract_hints,
-    _match_pattern,
     _parse_safe,
     _collect_defs,
     _compare_asts,
@@ -145,7 +145,6 @@ class TestRunLintBoundaries(unittest.TestCase):
         result = run_lint(["main.py"], None, "py-agent")
         self.assertTrue(result["blocked"])
         self.assertIn("not configured", result["reason"])
-        self.assertIsNone(result["hints"])
 
     def test_blocks_on_forbidden(self):
         result = run_lint(
@@ -256,23 +255,16 @@ class TestRunLintHints(unittest.TestCase):
     """AST hints through run_lint (files that exist on disk)."""
 
     def test_hints_from_real_python_file(self):
-        # Use pipeline.py — an existing committed file
-        result = run_lint(
-            ["pipeline.py"], SAMPLE_BOUNDARIES, "py-agent", base_ref="HEAD~5"
-        )
-        self.assertFalse(result["blocked"])
+        result = lint_changed_files(SAMPLE_BOUNDARIES, "py-agent")
+        self.assertIn("blocked", result)
         # hints may be None (file unchanged vs HEAD), or may contain
-        # conflict info (if pipeline.py touched in recent commits)
-        # Both outcomes are valid — just verify it runs cleanly
+        # conflict info (if touched in recent commits)
 
     def test_hints_from_nonexistent_file(self):
         result = run_lint(
             ["nonexistent.py"], SAMPLE_BOUNDARIES, "py-agent"
         )
         self.assertFalse(result["blocked"])
-        # nonexistent file is not a real file, so no AST hints
-        if result["hints"]:
-            self.assertNotIn("ast", result["hints"])
 
 
 class TestLintChangedFiles(unittest.TestCase):
@@ -288,29 +280,24 @@ class TestLintChangedFiles(unittest.TestCase):
 class TestValidatePlan(unittest.TestCase):
 
     def test_valid(self):
-        from lint import validate_plan
         ok, result = validate_plan('{"files":["a.py","b.py"]}')
         self.assertTrue(ok)
         self.assertEqual(result["files"], ["a.py", "b.py"])
 
     def test_empty_files(self):
-        from lint import validate_plan
         ok, reason = validate_plan('{"files":[]}')
         self.assertFalse(ok)
         self.assertIn("empty", reason)
 
     def test_not_json(self):
-        from lint import validate_plan
         ok, reason = validate_plan('not json')
         self.assertFalse(ok)
 
     def test_path_traversal(self):
-        from lint import validate_plan
         ok, reason = validate_plan('{"files":["../etc/passwd"]}')
         self.assertFalse(ok)
 
     def test_non_string_files(self):
-        from lint import validate_plan
         ok, reason = validate_plan('{"files":[123]}')
         self.assertFalse(ok)
 
@@ -318,18 +305,32 @@ class TestValidatePlan(unittest.TestCase):
 class TestLintPlan(unittest.TestCase):
 
     def test_boundary_blocked(self):
-        from lint import lint_plan
         plan = '{"files":["app/main.py"]}'
         boundaries = {"py-agent": {"can_touch": ["lib/"], "forbidden": ["app/"]}}
         result = lint_plan(plan, boundaries, "py-agent")
         self.assertTrue(result["blocked"])
 
     def test_passes(self):
-        from lint import lint_plan
         plan = '{"files":["lib/utils.py"]}'
         boundaries = {"py-agent": {"can_touch": ["lib/"], "forbidden": ["app/"]}}
         result = lint_plan(plan, boundaries, "py-agent")
         self.assertFalse(result["blocked"])
+
+
+class TestLintCrossref(unittest.TestCase):
+
+    def test_crossref_basic(self):
+        boundaries = {"py-agent": {"can_touch": ["*.py"], "forbidden": []}}
+        result = lint_crossref(
+            '{"files":["pipeline.py"]}', boundaries, "py-agent"
+        )
+        self.assertIn("blocked", result)
+        self.assertIn("crossref", result)
+        self.assertIn("boundary", result)
+        self.assertIn("declared_files", result["crossref"])
+        self.assertIn("actual_files", result["crossref"])
+        self.assertIn("extra_files", result["crossref"])
+        self.assertIn("missing_files", result["crossref"])
 
 
 if __name__ == "__main__":

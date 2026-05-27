@@ -10,7 +10,7 @@ import json
 import subprocess
 from orchestrator import Orchestrator
 from pipeline import transition_stage
-from lint import lint_changed_files
+from lint_full import lint_changed_files, lint_crossref
 
 orc = Orchestrator()
 ```

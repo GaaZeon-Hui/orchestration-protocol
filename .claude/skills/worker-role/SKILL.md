@@ -1,247 +1,121 @@
 ---
 name: worker-role
-description: Worker Agent role. Uses orchestrator.py for queries and pipeline.transition_stage() for stage progression. Handles pipeline init, approval monitoring, transition_stage progression, self-review, completion, and crash recovery.
+description: Worker Agent role. Pre-init project/register lookup, plan submission, code modification, correction loop, lock release.
 ---
 
 # Worker Agent Role
 
-> 此后每次启动直接加载本文件，不再读 `orchestration-protocol` 入口。
-
-**查询用 `orchestrator.py`，stage 推进统一走 `pipeline.transition_stage()`。** 导入：
-
 ```python
+import json
 from orchestrator import Orchestrator
 from pipeline import transition_stage
 
 orc = Orchestrator()
+AGENT_ID = "py-agent"  # set per agent
 ```
 
-## 权限边界
+## Permissions
 
-Worker 只能从以下 stage 发起 `transition_stage()`：
+可以从以下 stage 推进：`init`, `worker_modify`, `verified`.
 
-| from_stage | → to_stage |
-|------------|------------|
-| `approved` | `modifying` |
-| `modifying` | `self_review_done` |
-| `self_review_done` | `completion_submitted` |
-| `completed` | `lock_released` |
-| （`completed` 超时未被释锁时，Orchestrator 可接管执行 `completed` → `lock_released`） | |
+## Pre-Init Phase (before pipeline creation)
 
-尝试从 Orchestrator 专属 stage（`request_submitted`, `conflict_analysis_done`, `boundary_analysis_done`, `logic_analysis_done`, `completion_submitted`）推进 → `PermissionError`。
+```
+1. R: project table → find target file index
+   - If file_use is occupied → wait (/loop)
+   - If file_use is NULL → write own ID
+   - If agent_status == '异常还原' → take over (write own ID to file_use)
+2. R: register table → get own schema via agent_id
+3. R: project context
+4. Produce reason_json and plan_json
+```
 
-## Quick Reference
-
-| Step | What | 调用 |
-|------|------|------|
-| 0. Configure | 检查模块边界，未配置则要求用户设定 | `orc.get_boundaries()` → `orc.set_boundaries()` |
-| 1. Restore | 查未完成 pipeline + 崩溃恢复 | `orc.get_pending_requests(agent)` / `orc.recover_pipeline(agent)` |
-| 2. Pull + Read | git pull, 当前状态, 边界 | `orc.get_pipeline(req_id)` / `orc.get_boundaries()` |
-| 3. Check | 确认同 agent 无 modifying 冲突 | `orc.get_pending_requests(agent)` |
-| 4. Init | 创建 pipeline | `orc.init_pipeline(...)` |
-| 5. Check approval | 检查审批状态（单次，未审批则 `/loop` 复invoke） | `orc.get_pipeline(req_id)` |
-| 6. Read approval | 查审批结果 | `orc.get_pipeline(req_id)` → `granted_scope_json` |
-| 7. Modify | 仅修改授权文件，对照模块边界 | `transition_stage(req_id, 'modifying', role='worker', ...)` |
-| 8. Self-review | 自审越界和逻辑变更 | → `transition_stage(req_id, 'self_review_done', role='worker', ...)` |
-| 9a. Submit completion | 提交 completion | `transition_stage(req_id, 'completion_submitted', role='worker', ...)` |
-| 9b. Wait verify | 等 Orchestrator 验证后释锁（单次检查） | `orc.get_pipeline(req_id)` → `transition_stage(..., 'lock_released')` |
-
-## Step 0: 配置模块边界
-
-**首次启动必须执行，后续每次确认。**
-
-调用 `orc.get_boundaries()` → 返回 `dict` 或 `None`。
-
-若 `None`：要求用户为各 agent 分别指定可修改和禁止的目录。
-
-配置格式（写入 `context.boundaries_json`）：
+**reason_json format:**
 ```json
-{
-  "py-agent": { "can_touch": ["*.py"], "forbidden": ["*.md", "app/", "service/"] },
-  "service-agent": { "can_touch": ["service/"], "forbidden": ["app/", "*.py", "*.md"] },
-  "ui-agent": { "can_touch": ["app/"], "forbidden": ["service/", "*.py", "*.md"] },
-  "md-agent": { "can_touch": ["*.md"], "forbidden": ["*.py", "app/", "service/"] }
-}
+{"reason": "修复空指针", "agent_id": "py-agent-001", "schema": {...}}
 ```
 
-保存：`orc.set_boundaries(boundaries)`
-
-若已有值：显示当前配置，询问用户是否需要修改。修改和自审时必须对照此配置。
-
-## Step 1: 恢复上下文 + 崩溃恢复
-
-```python
-# 查未完成的 pipeline
-pending = orc.get_pending_requests('md-agent')
-# 或按断点恢复
-pipeline = orc.recover_pipeline('md-agent')
+**plan_json format:**
+```json
+{"files": ["a.py"], "changes": [{"file": "a.py", "type": "modify", "hint": "第42行添加None检查"}]}
 ```
 
-有未完成 pipeline → 从 `stage` 断点续跑：
-- `request_submitted` → 跳到 Step 5（检查审批，未审批则 `/loop` 复invoke）
-- `approved` → 跳到 Step 7（执行修改）
-- `modifying` / `self_review_done` → 从对应 stage 继续
-- `completion_submitted` → 跳到 Step 9b（等 orchestrator 验证）
-- `completed` → 直接 `transition_stage(req_id, 'lock_released', role='worker', ...)`
-
-## Step 2: Pull + 读取状态
-
-```bash
-git pull
-```
-
-读取当前 pipeline 状态和边界：`orc.get_pipeline(req_id)` / `orc.get_boundaries()`
-
-## Step 3: 检查冲突
-
-调用 `orc.get_pending_requests(agent)` 确认同 agent 无 pipeline 处于 `modifying` 状态。
-
-## Step 4: 初始化 Pipeline
+## init: Pipeline Creation
 
 ```python
 req_id = orc.init_pipeline(
-    agent='md-agent',
-    reason='变更原因',
-    scope={'modules': [...], 'files': [...], 'excluded': [...]},
-    plan={'summary': '...', 'steps': [...], 'breaking_changes': False, 'affects_contract': []},
-    self_review={'potential_issues': ['预判问题 — 为什么安全']},
-    constraints=['约束1', '约束2'],
-    tz=None
+    agent=AGENT_ID,
+    reason={'reason': '修复空指针', 'agent_id': AGENT_ID, 'schema': schema},
+    plan={'files': ['a.py'], 'changes': [{'file': 'a.py', 'type': 'modify', 'hint': '添加None检查'}]}
 )
 ```
 
-Agent types: `engine-agent` | `service-agent` | `ui-agent` | `md-agent` | `py-agent`
+## worker_modify: 修改代码
 
-## Step 5: 检查审批状态
-
-**每次调用只查一次，不阻塞轮询。** 若尚未审批，汇报当前 stage 后结束——用 `/loop` 定时复invoke 本角色继续检查。
-
-```python
-p = orc.get_pipeline(req_id)
-stage = p['stage']
-
-if stage == 'rejected':
-    print(f"被拒: {p.get('rejection_reason')}")
-    return  # 流程终止
-
-if stage in ('approved',):
-    # 审批通过 → 继续 Step 6
-    pass
-else:
-    # 仍在等待（request_submitted / conflict_analysis_done / ...）
-    print(f"当前 stage: {stage}，等待 orchestrator 审批中")
-    print("建议: /loop 30s 继续检查审批状态")
-    return  # 本次调用结束，/loop 会在 30s 后重新 invoke
+```
+Round 1: read plan_json → modify code → write commits_json → advance to reviewer_check
+Round N (correction): read feedback_r{N-1} → write plan_rN → modify code → advance to reviewer_check
 ```
 
-WAL 模式下 Orchestrator 的 `transition_stage()` 不会阻塞 Worker 的 `get_pipeline()` SELECT。
-
-**重要**：`/loop` 复invoke 时，Worker 应从 Step 1（崩溃恢复）开始，`recover_pipeline()` 会定位到当前 stage，然后跳回 Step 5 继续等审批——不需要重新 `init_pipeline()`。
-
-## Step 6: 读取审批详情
-
 ```python
 p = orc.get_pipeline(req_id)
-granted_scope = json.loads(p['granted_scope_json'])
 rev = p['revision']
+round_num = p.get('review_round', 1) or 1
+plan_key = 'plan_json' if round_num == 1 else f'plan_r{round_num}'
+
+# On correction rounds, read Orch feedback
+if round_num > 1:
+    feedback = json.loads(p.get(f'feedback_r{round_num - 1}', '{}'))
+    # feedback tells what to fix — follow it
+
+plan = json.loads(p[plan_key])
+# Modify code per plan
+# git add + git commit
+
+transition_stage(req_id, 'reviewer_check', 'worker', rev, orc.db_path,
+                 commits_json=json.dumps(['abc123'], ensure_ascii=False),
+                 **{plan_key: json.dumps(plan, ensure_ascii=False)})
 ```
 
-## Step 7: 执行修改
-
-```python
-rev, stage = transition_stage(
-    req_id, 'modifying',
-    role='worker', revision=rev, db_path=orc.db_path
-)
-```
-
-仅修改授权 scope 中的文件。修改完成后进入 Step 8 自审。
-
-## Step 8: 自审
-
-自审越界（对照 `orc.get_boundaries()`）和逻辑变更。完成后推进 stage：
-
-```python
-rev, stage = transition_stage(
-    req_id, 'self_review_done',
-    role='worker', revision=rev, db_path=orc.db_path,
-    self_review_json=json.dumps({
-        'files_modified': [...],
-        'files_not_in_scope': [],
-        'new_functions_created': [],
-        'breaking_changes': [],
-        'constraints_violated': [],
-        'potential_issues': [],
-    }, ensure_ascii=False),
-)
-```
-
-## Step 9: 提交 Completion + 等验证释锁
-
-### 9a. 提交 Completion
-
-```python
-rev, stage = transition_stage(
-    req_id, 'completion_submitted',
-    role='worker', revision=rev, db_path=orc.db_path,
-    commits_json=json.dumps([...], ensure_ascii=False),
-    sync_notes='...',
-    context_updates_json=json.dumps({...}, ensure_ascii=False)
-)
-```
-
-### 9b. 等待 Orchestrator 验证
-
-**每次调用只查一次。** 跟 Step 5 同理，不阻塞轮询：
+## Polling for Approval
 
 ```python
 p = orc.get_pipeline(req_id)
-stage = p['stage']
-
-if stage == 'completed':
-    rev = p['revision']
-    transition_stage(
-        req_id, 'lock_released',
-        role='worker', revision=rev, db_path=orc.db_path
-    )
-    print("锁已释放，流程结束")
-    return
-
-if stage == 'rejected':
-    print(f"completion 被拒: {p.get('rejection_reason')}")
-    return
-
-# 仍在等待
-print(f"当前 stage: {stage}，等待 orchestrator 验证 completion")
-print("建议: /loop 30s 继续检查")
+if p['stage'] == 'init':
+    # Waiting for orch gate → /loop 30s
+elif p['stage'] == 'worker_modify':
+    # Approved → do work
+elif p['stage'] == 'verified':
+    # Go to lock release
 ```
 
-**注意**：`/loop` 复invoke 时，Worker 从 Step 1 恢复，`recover_pipeline()` 返回 `completion_submitted`，直接跳回 Step 9b 继续等。
+## verified: Lock Release
 
-self_review 格式（在 Step 8 `self_review_done` 时传入）：
-```json
-{
-  "files_modified": [...],
-  "files_not_in_scope": [],
-  "new_functions_created": [],
-  "breaking_changes": [],
-  "constraints_violated": [],
-  "potential_issues": []
-}
+```python
+p = orc.get_pipeline(req_id)
+rev = p['revision']
+transition_stage(req_id, 'lock_released', 'worker', rev, orc.db_path)
+
+# Read decision
+hi = json.loads(p.get('human_intervention', 'null') or 'null') or {}
+decision = hi.get('decision', None) if isinstance(hi, dict) else None
+
+# Clear file occupation
+conn = orc._connect()
+conn.execute("UPDATE project SET file_use=NULL WHERE file_use=?", (AGENT_ID,))
+conn.commit()
+conn.close()
+
+if decision == 'reject_restart':
+    # Create new pipeline — go back to Pre-Init Phase
 ```
-
----
 
 ## 崩溃恢复
 
-每次 Worker 启动时（Step 1），先调用 `orc.recover_pipeline(agent)` 检查断点：
-
-| 断点 stage | 操作 |
-|------------|------|
-| `request_submitted` | 跳回 Step 5 检查审批（未审批则建议 `/loop`） |
-| `approved` | 跳回 Step 7 执行修改 |
-| `modifying` | 检查 git status，有未提交修改则继续，否则从 Step 7 重做 |
-| `self_review_done` | 跳回 Step 8 重做自审，然后 Step 9 |
-| `completion_submitted` | 跳回 Step 9b 等 Orchestrator 验证 |
-| `completed` | 直接 `transition_stage(req_id, 'lock_released', role='worker', ...)` |
-| `lock_released` | 已完成，跳过 |
+```python
+req_id, stage = orc.recover_pipeline(AGENT_ID)
+# init → wait for gate, /loop
+# worker_modify → continue modifying
+# verified → lock release
+# None → no active pipeline, wait for new task
+```

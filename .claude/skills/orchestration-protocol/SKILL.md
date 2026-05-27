@@ -1,141 +1,50 @@
 ---
 name: orchestration-protocol
-description: Entry point. Determines role via heartbeat and redirects to role-specific file.
+description: Entry point. Determines role via register table and redirects to role-specific file.
 ---
 
 # Orchestration Protocol — Entry
 
 | 角色 | 职责 | 角色文件 |
 |------|------|---------|
-| **Orchestrator** | 哨兵检查 → 三项分析 → transition_stage 审批 → 验证释锁 | `orchestrator-role.md` |
-| **Worker Agent** | init_pipeline → 等审批 → transition_stage 推进 → 自审 → completion | `worker-role.md` |
+| **Orchestrator** | Gate 准入 → 仲裁 → 人工介入协调 | `orchestrator-role` |
+| **Worker** | 前置准备 → 声明计划 → 改码 → 修正回路 → 释锁 | `worker-role` |
+| **Reviewer** | 验证 commit 是否符合 plan → 超时检测 → 文件复原 | `reviewer-role` |
 
 ## 架构
 
-单表 `pipeline_state` + `context` + `audit_log` 三表。独立模块 `pipeline.py` 提供 `transition_stage()`（CAS + 权限校验 + 审计），`lint.py` 提供程序化预检（越界 glob 匹配 + 文件冲突检测 + AST 变更提取）。旧 5 表（`lock`, `requests`, `approvals`, `completions`, `processed`）已移除。
+4 表：`pipeline_state` + `project` + `register` + `audit_log`。
+`pipeline.py` 提供 `transition_stage()`（CAS + 权限校验 + 审计）。
+`lint.py` 提供 `lint_plan()`（gate 用）和 `lint_changed_files()`（reviewer 用）。
 
 ## 角色注册
 
-首次加载时执行。之后每次启动直接加载对应的角色 md。
-
-1. 导入库：`from orchestrator import Orchestrator; orc = Orchestrator()`
-2. 初始化：`orc.init_db()` → `orc.migrate()`
-3. 检查存活：`orc.check_orchestrator_alive()` → `(is_alive, orch_id)`
-4. 存活 → **worker**。否则调用 `orc.try_register()` 抢注。
-5. 抢注成功 → **orchestrator** → 立即调用 `Skill(skill="orchestrator-role")`
-   抢注失败/已存活 → **worker** → 立即调用 `Skill(skill="worker-role")`
-
-两个 agent 同时抢注时，SQLite 行级锁保证仅一个成功。
-
-## 状态转移（`pipeline.VALID_TRANSITIONS`）
-
-```
-request_submitted → conflict_analysis_done → boundary_analysis_done
-    → logic_analysis_done → approved → modifying → self_review_done
-    → completion_submitted → completed → lock_released
-                         ↘ rejected
+```python
+from orchestrator import Orchestrator
+orc = Orchestrator()
+orc.init_db()
+orc.migrate()
+role = orc.try_register()
+print(f"ROLE: {role}")
 ```
 
-`transition_stage()` 通过 CAS（`WHERE stage=? AND revision=?`）保证并发安全。SQL trigger `tr_stage_transition` 兜底校验转移合法性。
+- `ROLE: orchestrator` → 读 `.claude/skills/orchestrator-role/SKILL.md`
+- `ROLE: worker` → 读 `.claude/skills/worker-role/SKILL.md`
+- `ROLE: reviewer` → 读 `.claude/skills/reviewer-role/SKILL.md`
 
-## 权限矩阵（`pipeline.ROLE_PERMISSIONS`）
+## 状态转移
 
-| Role | 可发起的 from_stage | → to_stage |
-|------|---------------------|------------|
-| **orchestrator** | `request_submitted` | `conflict_analysis_done` |
-| | `conflict_analysis_done` | `boundary_analysis_done` |
-| | `boundary_analysis_done` | `logic_analysis_done` |
-| | `logic_analysis_done` | `approved` / `rejected` |
-| | `completion_submitted` | `completed` |
-| | `completed` | `lock_released`（孤儿锁接管） |
-| **worker** | `approved` | `modifying` |
-| | `modifying` | `self_review_done` |
-| | `self_review_done` | `completion_submitted` |
-| | `completed` | `lock_released` |
-
-## 数据库 Schema（参考，由 `orc.init_db()` 自动创建）
-
-```sql
-PRAGMA journal_mode=WAL;
-PRAGMA synchronous=NORMAL;
-PRAGMA foreign_keys=ON;
-PRAGMA busy_timeout=5000;
-
-CREATE TABLE IF NOT EXISTS pipeline_state (
-    request_id TEXT PRIMARY KEY,
-    agent TEXT NOT NULL,
-    stage TEXT NOT NULL DEFAULT 'request_submitted' CHECK(stage IN (
-        'request_submitted', 'conflict_analysis_done',
-        'boundary_analysis_done', 'logic_analysis_done',
-        'approved', 'rejected',
-        'modifying', 'self_review_done',
-        'completion_submitted', 'completed', 'lock_released'
-    )),
-    revision INTEGER NOT NULL DEFAULT 0,
-
-    -- 请求数据
-    reason TEXT, scope_json TEXT, plan_json TEXT,
-    self_review_json TEXT, constraints_json TEXT,
-
-    -- 审批数据
-    approval_status TEXT, granted_scope_json TEXT,
-    rejection_reason TEXT, reviewed_by TEXT,
-
-    -- Completion 数据
-    completed_at TEXT, commits_json TEXT,
-    sync_notes TEXT, context_updates_json TEXT,
-
-    -- 分析中间态（崩溃恢复用）
-    conflict_analysis_json TEXT,
-    boundary_analysis_json TEXT,
-    logic_analysis_json TEXT,
-
-    created_at TEXT DEFAULT (datetime('now','localtime')),
-    updated_at TEXT DEFAULT (datetime('now','localtime'))
-);
-
-CREATE TABLE IF NOT EXISTS audit_log (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    request_id TEXT NOT NULL,
-    role TEXT NOT NULL,
-    stage_from TEXT NOT NULL,
-    stage_to TEXT NOT NULL,
-    revision_before INTEGER,
-    revision_after INTEGER,
-    payload_json TEXT,
-    created_at TEXT DEFAULT (datetime('now','localtime'))
-);
-CREATE INDEX IF NOT EXISTS idx_audit_request ON audit_log(request_id);
-CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at);
-
-CREATE TABLE IF NOT EXISTS context (
-    id INTEGER PRIMARY KEY CHECK(id=1),
-    last_commit TEXT, agent_history_json TEXT DEFAULT '[]',
-    warnings_json TEXT DEFAULT '[]', boundaries_json TEXT,
-    pipeline TEXT, api_contract TEXT, meta_fields TEXT,
-    orchestrator_id TEXT,
-    orchestrator_heartbeat TEXT,
-    orchestrator_started_at TEXT,
-    updated_at TEXT DEFAULT (datetime('now','localtime'))
-);
-INSERT OR IGNORE INTO context (id) VALUES (1);
+```
+init → orchestrator_gate → worker_modify → reviewer_check → orchestrator_arbiter → verified → lock_released
+                                                                                ↘ rejected
 ```
 
-## 模块边界
+修正回路：`orchestrator_arbiter → worker_modify`（review_round += 1，最多 4 轮）。
 
-由用户首次启动时配置，存储在 `context.boundaries_json`。所有角色通过 `orc.get_boundaries()` 读取。
+## 权限矩阵
 
-## 核心 API
-
-| 函数 | 模块 | 说明 |
-|------|------|------|
-| `transition_stage(req_id, new_stage, role, revision, db_path, **kwargs)` | `pipeline.py` | 唯一 stage 推进入口，含权限+审计 |
-| `run_lint(files_changed, boundaries, agent, base_ref)` | `lint.py` | 越界检查+冲突检测+AST hints，过不了直接 reject |
-| `lint_changed_files(boundaries, agent, base_ref)` | `lint.py` | 便捷函数：git diff --name-only → run_lint() |
-| `init_pipeline(agent, reason, scope, plan, self_review, constraints, tz)` | `orchestrator.py` | 创建 pipeline（同 agent 活跃 pipeline 互斥） |
-| `get_pipeline(request_id)` | `orchestrator.py` | 查询单条 pipeline，JSON 列自动反序列化 |
-| `get_pending_requests(agent)` | `orchestrator.py` | 查未完成 pipeline |
-| `get_requests_by_stage(stage)` | `orchestrator.py` | 按 stage 查询 |
-| `recover_pipeline(agent)` | `orchestrator.py` | 崩溃恢复 |
-| `check_and_heartbeat(orchestrator_id)` | `orchestrator.py` | 单次心跳+扫描新事项 |
-| `get_boundaries()` / `set_boundaries(b)` | `orchestrator.py` | 模块边界 |
+| Role | 可发起的 from_stage |
+|------|---------------------|
+| orchestrator | init, orchestrator_gate, orchestrator_arbiter, verified, worker_modify |
+| worker | init, worker_modify, verified |
+| reviewer | reviewer_check |

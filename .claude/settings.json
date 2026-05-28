@@ -1,5 +1,19 @@
 {
   "enabledPlugins": {
     "superpowers@claude-plugins-official": true
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -c \"from orchestrator import Orchestrator; orc=Orchestrator(); orc.init_db(); orc.migrate(); role=orc.try_register(); print(f'ROLE: {role}')\"",
+            "timeout": 30,
+            "statusMessage": "Registering agent role..."
+          }
+        ]
+      }
+    ]
   }
 }

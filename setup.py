@@ -7,6 +7,7 @@ Creates the database, registers the current user as orchestrator,
 opens the status dashboard, and prints instructions to create
 worker and reviewer agents.
 """
+import json
 import os
 import subprocess
 import sys
@@ -34,7 +35,8 @@ def main():
     ).fetchone()
     if not existing:
         conn.execute(
-            "INSERT INTO register (agent_id, role, schema_json) VALUES (?, 'orchestrator', '{}')",
+            "INSERT INTO register (agent_id, role, schema_json, heartbeat) "
+            "VALUES (?, 'orchestrator', '{}', datetime('now','localtime'))",
             (agent_id,),
         )
         conn.commit()
@@ -42,6 +44,12 @@ def main():
     else:
         print("  '{}' already registered as {}.".format(agent_id, existing[0]))
     conn.close()
+
+    # ── Save agent_id so CLAUDE.md skips the prompt ──────
+    os.makedirs(".claude", exist_ok=True)
+    with open(".claude/agent_id.json", "w") as f:
+        json.dump({"agent_id": agent_id}, f)
+    print("  Saved agent_id to .claude/agent_id.json")
 
     # ── Create default project if none exist ─────────────
     conn = orc._connect()

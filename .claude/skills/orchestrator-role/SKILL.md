@@ -45,10 +45,9 @@ if not has_reviewer or not has_worker:
     if not has_reviewer: missing.append("reviewer")
     if not has_worker: missing.append("worker")
     print(f"Missing agents: {', '.join(missing)}")
-    print("Run: python spawn_agents.py")
-    # LLM: ask user "Spawn missing agents now?" 
-    # If yes → execute: python spawn_agents.py
-    # The script opens 2 terminals running `claude`, each auto-registers.
+    print("自动执行 spawn_agents.py 打开 reviewer 和 worker 终端...")
+    import subprocess, sys
+    subprocess.run([sys.executable, "spawn_agents.py"])
 
 result = orc.check_and_heartbeat(agent_id)
 for item in result['items']:

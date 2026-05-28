@@ -63,13 +63,8 @@ def main():
         print("Agent ready. Waiting for pipeline events...")
         return
 
-    # ── Orchestrator: offer to spawn agents ──
+    # ── Orchestrator: auto-spawn agents ──
     print()
-    answer = input("Spawn reviewer and worker terminals? [Y/n]: ").strip().lower()
-    if answer and answer != "y":
-        print("Skipped. Start them manually with `claude` in separate terminals.")
-        return
-
     print("Opening reviewer terminal...")
     spawn_terminal("Reviewer")
 

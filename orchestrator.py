@@ -101,7 +101,8 @@ class Orchestrator:
             CREATE TABLE IF NOT EXISTS register (
                 agent_id TEXT PRIMARY KEY,
                 role TEXT NOT NULL,
-                schema_json TEXT
+                schema_json TEXT,
+                heartbeat TEXT
             );
 
             CREATE TABLE IF NOT EXISTS audit_log (
@@ -160,9 +161,17 @@ class Orchestrator:
             CREATE TABLE IF NOT EXISTS register (
                 agent_id TEXT PRIMARY KEY,
                 role TEXT NOT NULL,
-                schema_json TEXT
+                schema_json TEXT,
+                heartbeat TEXT
             )
         """)
+        try:
+            conn.execute(
+                "ALTER TABLE register ADD COLUMN heartbeat TEXT"
+            )
+        except sqlite3.OperationalError as e:
+            if "duplicate column name" not in str(e).lower():
+                raise
         # New pipeline columns (round-based + human intervention)
         new_pipeline_cols = [
             'reason_json', 'plan_json',
@@ -205,23 +214,79 @@ class Orchestrator:
         conn.commit()
         conn.close()
 
-    # ── Role registration (uses register table) ─────────────
+    # ── Role registration (uses register table + heartbeat) ─
+
+    HEARTBEAT_TIMEOUT = 90  # seconds before a role is considered dead
 
     def try_register(self, agent_id=None):
-        """Consult register table for role. Returns 'orchestrator', 'worker', or 'reviewer'."""
+        """Register this agent and return its role.
+
+        Priority order when auto-promoting:
+          1. orchestrator (if dead or missing)
+          2. reviewer (if dead or missing)
+          3. worker (default fallback)
+
+        If *agent_id* already has a registered role, return it
+        and refresh the heartbeat.
+        """
         if agent_id is None:
             agent_id = str(uuid.uuid4())[:8]
 
         conn = self._connect()
-        row = conn.execute(
-            "SELECT role FROM register WHERE agent_id=?",
-            (agent_id,)
-        ).fetchone()
-        conn.close()
 
+        # 1. Already registered — refresh heartbeat, return role
+        row = conn.execute(
+            "SELECT role, heartbeat FROM register WHERE agent_id=?",
+            (agent_id,),
+        ).fetchone()
         if row:
+            conn.execute(
+                "UPDATE register SET heartbeat=datetime('now','localtime') WHERE agent_id=?",
+                (agent_id,),
+            )
+            conn.commit()
+            conn.close()
             return row[0]
-        return "worker"
+
+        # 2. Check if orchestrator is alive
+        orch_alive = self._is_role_alive(conn, "orchestrator")
+
+        # 3. Check if reviewer is alive
+        rev_alive = self._is_role_alive(conn, "reviewer")
+
+        # 4. Auto-promote: priority orch > reviewer > worker
+        if not orch_alive:
+            role = "orchestrator"
+        elif not rev_alive:
+            role = "reviewer"
+        else:
+            role = "worker"
+
+        conn.execute(
+            "INSERT INTO register (agent_id, role, schema_json, heartbeat) "
+            "VALUES (?, ?, '{}', datetime('now','localtime'))",
+            (agent_id, role),
+        )
+        conn.commit()
+        conn.close()
+        return role
+
+    def _is_role_alive(self, conn, role):
+        """Check if any agent with *role* has a recent heartbeat."""
+        row = conn.execute(
+            "SELECT heartbeat FROM register WHERE role=? ORDER BY heartbeat DESC LIMIT 1",
+            (role,),
+        ).fetchone()
+        if not row or not row[0]:
+            return False
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT datetime(?) >= datetime('now','localtime','-%d seconds')"
+            % self.HEARTBEAT_TIMEOUT,
+            (row[0],),
+        )
+        alive = bool(cur.fetchone()[0])
+        return alive
 
     def check_and_heartbeat(self, orchestrator_id):
         """Scan for new pipeline events.

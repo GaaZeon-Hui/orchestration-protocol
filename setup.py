@@ -1,0 +1,97 @@
+"""Bootstrap script for first-time setup.
+
+Usage:
+    python setup.py
+
+Creates the database, registers the current user as orchestrator,
+opens the status dashboard, and prints instructions to create
+worker and reviewer agents.
+"""
+import os
+import subprocess
+import sys
+import uuid
+
+from orchestrator import Orchestrator
+
+DB_PATH = ".claude/orchestrator/orchestrator.db"
+
+
+def main():
+    orc = Orchestrator(DB_PATH)
+    orc.init_db()
+    orc.migrate()
+
+    # ── Register orchestrator ────────────────────────────
+    agent_id = input("Enter your agent name (e.g. orch-01): ").strip()
+    if not agent_id:
+        agent_id = "orch-" + str(uuid.uuid4())[:6]
+        print("  Using auto-generated ID: {}".format(agent_id))
+
+    conn = orc._connect()
+    existing = conn.execute(
+        "SELECT role FROM register WHERE agent_id=?", (agent_id,)
+    ).fetchone()
+    if not existing:
+        conn.execute(
+            "INSERT INTO register (agent_id, role, schema_json) VALUES (?, 'orchestrator', '{}')",
+            (agent_id,),
+        )
+        conn.commit()
+        print("  Registered '{}' as orchestrator.".format(agent_id))
+    else:
+        print("  '{}' already registered as {}.".format(agent_id, existing[0]))
+    conn.close()
+
+    # ── Create default project if none exist ─────────────
+    conn = orc._connect()
+    count = conn.execute("SELECT COUNT(*) FROM project").fetchone()[0]
+    if count == 0:
+        conn.execute(
+            "INSERT INTO project (id, content) VALUES (?, ?)",
+            ("demo-project", "Demo orchestration protocol project"),
+        )
+        conn.commit()
+        print("  Created default project 'demo-project'.")
+    conn.close()
+
+    # ── Open status dashboard ────────────────────────────
+    print()
+    print("  Opening status dashboard in a new terminal...")
+    status_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "status.py")
+    try:
+        subprocess.Popen(
+            ["python", status_path],
+            creationflags=subprocess.CREATE_NEW_CONSOLE
+            if sys.platform == "win32" else 0,
+        )
+    except Exception:
+        print("  (could not open status automatically — run 'python status.py' manually)")
+
+    # ── Instructions ─────────────────────────────────────
+    print()
+    print("=" * 60)
+    print("  Setup complete!")
+    print()
+    print("  To start orchestrating:")
+    print("    claude")
+    print()
+    print("  Then create your agents by registering them")
+    print("  in the 'register' table via Claude Code:")
+    print()
+    print("    Worker:   register (agent_id='py-agent', role='worker',")
+    print("              schema='{\"can_touch\":[\"*.py\"],\"forbidden\":[\"*.md\"]}')")
+    print()
+    print("    Reviewer: register (agent_id='reviewer-01', role='reviewer',")
+    print("              schema='{}')")
+    print()
+    print("  Agent auto-promotion rules:")
+    print("    - First agent to launch becomes orchestrator")
+    print("    - If orch is absent >90s, next agent auto-promotes")
+    print("    - Reviewer auto-promotes when absent >90s (same rule)")
+    print("    - If both orch + reviewer dead: orch first, then reviewer")
+    print("=" * 60)
+
+
+if __name__ == "__main__":
+    main()

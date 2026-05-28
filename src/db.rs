@@ -83,7 +83,7 @@ pub fn init_db(conn: &Connection) {
                   OR (OLD.stage='orchestrator_arbiter' AND NEW.stage IN ('verified','worker_modify'))
                   OR (OLD.stage='verified' AND NEW.stage='lock_released')
                 THEN NULL
-                ELSE RAISE(ABORT, 'Invalid transition: ' || OLD.stage || ' -> ' || NEW.stage)
+                ELSE RAISE(ABORT, 'Invalid transition')
             END;
         END;
     ",

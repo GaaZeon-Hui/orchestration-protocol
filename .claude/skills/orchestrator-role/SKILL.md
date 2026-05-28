@@ -23,8 +23,34 @@ orc = Orchestrator()
 ```python
 orc.init_db()
 orc.migrate()
-role = orc.try_register()
-result = orc.check_and_heartbeat(role)
+
+# Use the persisted agent_id from CLAUDE.md bootstrap
+import json, os
+with open(".claude/agent_id.json") as f:
+    agent_id = json.load(f)["agent_id"]
+role = orc.try_register(agent_id)
+
+# Check if reviewer and worker are alive — if not, offer to spawn
+conn = orc._connect()
+has_reviewer = conn.execute(
+    "SELECT COUNT(*) FROM register WHERE role='reviewer'"
+).fetchone()[0] > 0
+has_worker = conn.execute(
+    "SELECT COUNT(*) FROM register WHERE role='worker'"
+).fetchone()[0] > 0
+conn.close()
+
+if not has_reviewer or not has_worker:
+    missing = []
+    if not has_reviewer: missing.append("reviewer")
+    if not has_worker: missing.append("worker")
+    print(f"Missing agents: {', '.join(missing)}")
+    print("Run: python spawn_agents.py")
+    # LLM: ask user "Spawn missing agents now?" 
+    # If yes → execute: python spawn_agents.py
+    # The script opens 2 terminals running `claude`, each auto-registers.
+
+result = orc.check_and_heartbeat(agent_id)
 for item in result['items']:
     if item['type'] == 'new_request':
         # pipeline at stage='init' → gate review
